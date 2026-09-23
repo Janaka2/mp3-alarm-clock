@@ -273,6 +273,171 @@ class Player:
         return bool(pygame.mixer.music.get_busy())
 
 
+class AirPlayPlayer:
+    """
+    macOS only.  Plays through the Music app so the sound can go to AirPlay speakers
+    (HomePod, Apple TV, AirPlay receivers) – the same devices you pick in the Mac's Sound menu.
+    Every call talks to Music via osascript, so play()/stop() are run from a worker thread.
+    Alarm output values look like "airplay:<device name>".
+    """
+    PREFIX = "airplay:"
+
+    def __init__(self):
+        self._track_id: str | None = None
+        self._prev_volume: int | None = None
+        self._prev_devices: list[str] = []
+        self._stop_flag = threading.Event()
+        self._lock = threading.Lock()
+        self.playing = False
+
+    # ----- osascript plumbing
+    @staticmethod
+    def _q(text: str) -> str:
+        return text.replace("\\", "\\\\").replace('"', '\\"')
+
+    @staticmethod
+    def _run(script: str, timeout: int = 60) -> str:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            err = r.stderr.strip()
+            if "-1743" in err or "Not authorized" in err or "not allowed" in err:
+                raise RuntimeError("macOS blocked control of the Music app. Allow it in System Settings → "
+                                   "Privacy & Security → Automation (turn on Music for this app), then try again.")
+            if "AirPlay device" in err:
+                raise RuntimeError("Music could not find or select that AirPlay speaker. "
+                                   "Is it switched on and on the same Wi-Fi as this Mac?")
+            raise RuntimeError(err or f"osascript exit code {r.returncode}")
+        return r.stdout.strip()
+
+    @staticmethod
+    def music_running() -> bool:
+        try:
+            return AirPlayPlayer._run('tell application "System Events" to (name of processes) contains "Music"',
+                                      timeout=10) == "true"
+        except Exception:
+            return False
+
+    def prewarm(self) -> None:
+        """Launch Music ahead of an AirPlay alarm so the first command at ring time is fast."""
+        try:
+            self._run('tell application "Music" to launch', timeout=30)
+            log("Music launched ahead of an AirPlay alarm")
+        except Exception as e:
+            log(f"Music prewarm failed: {e}")
+
+    @classmethod
+    def devices(cls, launch: bool = False) -> list[dict]:
+        """AirPlay speakers Music can see (the computer itself is skipped).  Empty if Music is not running
+        and launch is False, so that opening the alarm clock never opens Music by itself."""
+        if not launch and not cls.music_running():
+            return []
+        out = cls._run('''tell application "Music"
+	set out to ""
+	repeat with d in AirPlay devices
+		set out to out & (name of d) & tab & (kind of d as text) & tab & (available of d) & linefeed
+	end repeat
+	return out
+end tell''', timeout=60)
+        devs = []
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3 and parts[1] != "computer":
+                devs.append({"name": parts[0], "kind": parts[1], "available": parts[2] == "true"})
+        return devs
+
+    # ----- playback (blocking – call from a worker thread)
+    def play(self, path: str, volume: int, device: str, loop: bool = True, fade_seconds: int = 0) -> None:
+        self._stop_flag.clear()
+        script = f'''tell application "Music"
+	set prevDevs to ""
+	repeat with d in AirPlay devices
+		if selected of d then set prevDevs to prevDevs & (name of d) & linefeed
+	end repeat
+	set prevVol to sound volume
+	set current AirPlay devices to {{AirPlay device "{self._q(device)}"}}
+	set theTrack to add (POSIX file "{self._q(path)}") to library playlist 1
+	set sound volume to {0 if fade_seconds else int(volume)}
+	set song repeat to {"one" if loop else "off"}
+	play theTrack
+	return (persistent ID of theTrack) & tab & prevVol & tab & prevDevs
+end tell'''
+        out = self._run(script, timeout=120)
+        tid, prev_vol, *prev = out.split("\t")
+        with self._lock:
+            self._track_id = tid
+            self._prev_volume = int(prev_vol)
+            self._prev_devices = [d for d in "\t".join(prev).splitlines() if d]
+            self.playing = True
+        log(f"AirPlay: playing {os.path.basename(path)} on '{device}' via Music")
+        if fade_seconds:
+            t0 = time.monotonic()
+            while not self._stop_flag.is_set():
+                frac = min(1.0, (time.monotonic() - t0) / fade_seconds)
+                self.set_volume(round(volume * frac))
+                if frac >= 1.0:
+                    break
+                self._stop_flag.wait(1.0)
+        if not loop:   # test playback: wait for the track to end, then tidy up
+            while not self._stop_flag.is_set() and self.is_playing():
+                self._stop_flag.wait(1.0)
+            self.stop()
+
+    def set_volume(self, volume: int) -> None:
+        if self.playing:
+            try:
+                self._run(f'tell application "Music" to set sound volume to {max(0, min(100, int(volume)))}', timeout=15)
+            except Exception as e:
+                log(f"AirPlay set_volume failed: {e}")
+
+    def is_playing(self) -> bool:
+        if not self.playing:
+            return False
+        try:
+            return self._run('tell application "Music" to (player state is playing)', timeout=15) == "true"
+        except Exception:
+            return False
+
+    def stop(self) -> None:
+        """Stop, remove the temporary track from the library, restore Music's volume and speaker selection."""
+        self._stop_flag.set()
+        with self._lock:
+            tid, prev_vol, prev = self._track_id, self._prev_volume, self._prev_devices
+            self._track_id, self.playing = None, False
+        if tid is None:
+            return
+        restore = ""
+        if prev:
+            names = ", ".join(f'"{self._q(n)}"' for n in prev)
+            restore = f'''
+	repeat with d in AirPlay devices
+		try
+			set selected of d to ({{{names}}} contains (name of d))
+		end try
+	end repeat'''
+        script = f'''tell application "Music"
+	stop
+	set song repeat to off
+	try
+		delete (first track of library playlist 1 whose persistent ID is "{tid}")
+	end try
+	set sound volume to {prev_vol if prev_vol is not None else 50}{restore}
+end tell'''
+        try:
+            self._run(script, timeout=60)
+            log("AirPlay: stopped, Music restored")
+        except Exception as e:
+            log(f"AirPlay stop/restore failed: {e}")
+
+
+def output_label(value: str) -> str:
+    """Human label for an alarm's stored output value."""
+    if not value:
+        return "default"
+    if value.startswith(AirPlayPlayer.PREFIX):
+        return "AirPlay: " + value[len(AirPlayPlayer.PREFIX):]
+    return value
+
+
 def set_system_volume(percent: int) -> None:
     """Best-effort: turn the OS output volume up so the alarm is actually audible."""
     percent = max(0, min(100, int(percent)))
@@ -647,6 +812,10 @@ class App(tk.Tk):
         self.minsize(760, 620)
         self.store = AlarmStore(DATA_FILE)
         self.player = Player()
+        self.airplay = AirPlayPlayer() if IS_MAC else None
+        self._output_map: dict[str, str] = {}
+        self._vol_job: str | None = None
+        self._prewarmed: str | None = None
         self.recorder = Recorder()
         self.power = PowerManager()
         self.events: queue.Queue = queue.Queue()
@@ -774,8 +943,10 @@ class App(tk.Tk):
         self.v_output = tk.StringVar(value=self.DEFAULT_OUTPUT)
         self.cb_output = ttk.Combobox(of, textvariable=self.v_output, state="readonly", width=34)
         self.cb_output.pack(side="left")
-        ttk.Button(of, text="↻", width=2, command=self._refresh_outputs).pack(side="left", padx=(2, 8))
-        ttk.Label(of, text="speakers / headset / HDMI – chosen per alarm", foreground="#666").pack(side="left")
+        self.cb_output.bind("<<ComboboxSelected>>", self._on_output_selected)
+        ttk.Button(of, text="↻", width=2, command=lambda: self._refresh_outputs(load_airplay=True)).pack(side="left", padx=(2, 8))
+        ttk.Label(of, text="speakers / headset / HDMI" + (" / AirPlay (HomePod, Apple TV) – chosen per alarm" if IS_MAC else " – chosen per alarm"),
+                  foreground="#666").pack(side="left")
         self._refresh_outputs()
 
         # Recorder
@@ -865,26 +1036,74 @@ class App(tk.Tk):
     # ----- form helpers
     DEFAULT_OUTPUT = "System default output"
 
-    def _refresh_outputs(self) -> None:
-        names = Player.output_devices()
-        current = self.v_output.get()
-        self.cb_output["values"] = [self.DEFAULT_OUTPUT] + names
-        if current not in self.cb_output["values"]:
+    LOAD_AIRPLAY = "__load_airplay__"
+
+    def _refresh_outputs(self, load_airplay: bool = False) -> None:
+        """Fill 'Play on': system default, local devices, then AirPlay speakers (macOS, read from Music).
+        AirPlay devices are only read when Music is already running, or when the user asks (↻ / list entry),
+        so opening the alarm clock never opens Music by itself."""
+        current = self._get_output()
+        self._output_map = {self.DEFAULT_OUTPUT: ""}
+        for n in Player.output_devices():
+            self._output_map[n] = n
+        if self.airplay:
+            try:
+                for d in self.airplay.devices(launch=load_airplay):
+                    label = f"AirPlay: {d['name']} ({d['kind']})" + ("" if d["available"] else "  (offline)")
+                    self._output_map[label] = AirPlayPlayer.PREFIX + d["name"]
+            except Exception as e:
+                log(f"AirPlay device list failed: {e}")
+                if hasattr(self, "l_form_hint"):
+                    self.l_form_hint.config(text=f"Could not read AirPlay speakers from Music: {e}")
+            if not any(v.startswith(AirPlayPlayer.PREFIX) for v in self._output_map.values()):
+                self._output_map["AirPlay speakers…  (select to load them from Music)"] = self.LOAD_AIRPLAY
+        self.cb_output["values"] = list(self._output_map)
+        self._set_output(current)
+
+    def _on_output_selected(self, _e=None) -> None:
+        if self._output_map.get(self.v_output.get()) == self.LOAD_AIRPLAY:
+            self._refresh_outputs(load_airplay=True)
+            first = next((lbl for lbl, v in self._output_map.items() if v.startswith(AirPlayPlayer.PREFIX)), None)
+            self.v_output.set(first or self.DEFAULT_OUTPUT)
+            if not first:
+                self.l_form_hint.config(text="Music found no AirPlay speakers. Check they are on and on the same Wi-Fi.")
+
+    def _set_output(self, value: str) -> None:
+        """Show an alarm's output in the combobox, even if that device is currently unplugged/offline."""
+        for label, v in self._output_map.items():
+            if v == value:
+                self.v_output.set(label)
+                return
+        if value:
+            label = output_label(value) + "  (not connected)"
+            self._output_map[label] = value
+            self.cb_output["values"] = list(self._output_map)
+            self.v_output.set(label)
+        else:
             self.v_output.set(self.DEFAULT_OUTPUT)
 
-    def _set_output(self, name: str) -> None:
-        """Show an alarm's output device in the combobox, even if that device is currently unplugged."""
-        values = list(self.cb_output["values"])
-        if name and name not in values:
-            values.append(name + "  (not connected)")
-            self.cb_output["values"] = values
-            self.v_output.set(name + "  (not connected)")
-        else:
-            self.v_output.set(name or self.DEFAULT_OUTPUT)
-
     def _get_output(self) -> str:
-        v = self.v_output.get().replace("  (not connected)", "")
-        return "" if v == self.DEFAULT_OUTPUT else v
+        v = self._output_map.get(self.v_output.get(), "")
+        return "" if v == self.LOAD_AIRPLAY else v
+
+    def _is_airplay(self, value: str) -> bool:
+        return bool(self.airplay) and value.startswith(AirPlayPlayer.PREFIX)
+
+    def _play_airplay(self, alarm: dict | None, path: str, volume: int, device: str, loop: bool, fade: int) -> None:
+        """Start AirPlay playback in a worker thread; failures come back through the event queue."""
+        def work():
+            try:
+                self.airplay.play(path, volume, device, loop=loop, fade_seconds=fade)
+                self.events.put(("notice", alarm, f"Playing on AirPlay speaker “{device}” via Music"))
+            except Exception as e:
+                log(f"AirPlay playback failed ({device}): {e}")
+                self.events.put(("airplay_failed", alarm, f"{e}"))
+        self.l_form_hint.config(text=f"Sending to AirPlay speaker “{device}” via Music…")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _stop_airplay(self) -> None:
+        if self.airplay and (self.airplay.playing or self.airplay._track_id):
+            threading.Thread(target=self.airplay.stop, daemon=True).start()
 
     def _set_date(self, d: date) -> None:
         self.v_year.set(f"{d.year:04d}"); self.v_month.set(f"{d.month:02d}"); self.v_day.set(f"{d.day:02d}")
@@ -1017,8 +1236,12 @@ class App(tk.Tk):
         if not p or not os.path.isfile(p):
             messagebox.showerror(APP_NAME, "Choose a sound file first.")
             return
+        out = self._get_output()
+        if self._is_airplay(out):
+            self._play_airplay(None, p, int(self.v_volume.get()), out[len(AirPlayPlayer.PREFIX):], loop=False, fade=0)
+            return
         try:
-            warning = self.player.play(p, self.v_volume.get(), loop=False, device=self._get_output())
+            warning = self.player.play(p, self.v_volume.get(), loop=False, device=out)
             self.l_form_hint.config(text=warning or f"Playing on {self._get_output() or 'system default output'}")
         except Exception as e:
             log(f"test playback failed for {p}: {e}")
@@ -1029,6 +1252,7 @@ class App(tk.Tk):
 
     def _stop_all(self) -> None:
         self.player.stop()
+        self._stop_airplay()
         for aid in list(self.ring_windows):
             self._dismiss(aid)
 
@@ -1037,6 +1261,10 @@ class App(tk.Tk):
         self.l_volume.config(text=f"{v} %")
         if self.player.is_playing():
             self.player.set_volume(v)
+        if self.airplay and self.airplay.playing:          # Music is slow: debounce to one call per 400 ms
+            if self._vol_job:
+                self.after_cancel(self._vol_job)
+            self._vol_job = self.after(400, lambda: threading.Thread(target=self.airplay.set_volume, args=(v,), daemon=True).start())
 
     def _refresh_mics(self) -> None:
         self.devices = Recorder.input_devices()
@@ -1110,7 +1338,7 @@ class App(tk.Tk):
             when = f"{nf:%a %d %b %H:%M}" if nf else ("—" if not a["enabled"] else "?")
             self.tree.insert("", "end", iid=a["id"], values=(
                 "✔" if a["enabled"] else "", when, a["repeat"], a["label"],
-                os.path.basename(a["sound"]), a.get("output") or "default", a["volume"]))
+                os.path.basename(a["sound"]), output_label(a.get("output", "")), a["volume"]))
         if select and self.tree.exists(select):
             self.tree.selection_set(select)
 
@@ -1160,6 +1388,10 @@ class App(tk.Tk):
             txt = "No alarm armed"
         self.l_status.config(text=f"{now:%H:%M:%S}   {txt}   •   data folder: {BASE_DIR}")
         self._tick_indicators()
+        if (self.airplay and ev and self._is_airplay(ev[1].get("output", "")) and self._prewarmed != ev[1]["id"]
+                and timedelta(0) <= ev[0] - now <= timedelta(minutes=3)):
+            self._prewarmed = ev[1]["id"]
+            threading.Thread(target=self.airplay.prewarm, daemon=True).start()
         # refresh "next ring" column once a minute
         if now.second == 0:
             sel = self.tree.selection()
@@ -1172,6 +1404,18 @@ class App(tk.Tk):
                 kind, a, when = self.events.get_nowait()
                 if kind == "ring":
                     self._ring(a, when)
+                elif kind == "notice":
+                    self.l_form_hint.config(text=when)
+                elif kind == "airplay_failed":
+                    self.l_form_hint.config(text=f"AirPlay failed: {when}  –  playing on this computer instead.")
+                    self.bell()
+                    if a is None or a["id"] in self.ring_windows:
+                        path = a["sound"] if a else self.v_sound.get()
+                        vol = int(a["volume"] if a else self.v_volume.get())
+                        try:
+                            self.player.play(path, vol, loop=a is not None, device="")
+                        except Exception as e:
+                            log(f"fallback playback failed: {e}")
                 elif kind == "missed":
                     self._refresh_list()
                     messagebox.showwarning(APP_NAME, f"Alarm “{a['label']}” was missed (it was due {when:%a %H:%M} "
@@ -1183,13 +1427,16 @@ class App(tk.Tk):
     # ----- ringing
     def _ring(self, a: dict, when: datetime) -> None:
         s = self.store.settings
-        if s.get("force_system_volume"):
+        use_airplay = self._is_airplay(a.get("output", ""))
+        if s.get("force_system_volume") and not use_airplay:
             threading.Thread(target=set_system_volume, args=(s.get("system_volume", 80),), daemon=True).start()
         fade = int(s.get("fade_seconds", 20) or 0)
         problem = ""
         if not os.path.isfile(a["sound"]):
             problem = (f"The sound file for “{a['label']}” is missing:\n{a['sound']}\n\n"
                        "It may have been moved or deleted. Pick another file in Alarm details and save.")
+        elif use_airplay:
+            self._play_airplay(a, a["sound"], int(a["volume"]), a["output"][len(AirPlayPlayer.PREFIX):], loop=True, fade=fade)
         else:
             try:
                 warning = self.player.play(a["sound"], 0 if fade else a["volume"], loop=True,
@@ -1270,6 +1517,7 @@ class App(tk.Tk):
         self.scheduler.ringing.discard(alarm_id)
         if not self.ring_windows:
             self.player.stop()
+            self._stop_airplay()
             self.b_stop.pack_forget()
             if self._fade_job:
                 self.after_cancel(self._fade_job)
@@ -1290,6 +1538,8 @@ class App(tk.Tk):
                 return
         self.scheduler.stop()
         self.player.stop()
+        if self.airplay and self.airplay.playing:
+            self.airplay.stop()
         if self.recorder.recording:
             try:
                 self.recorder.stop()

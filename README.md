@@ -23,6 +23,7 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 | 📅 **Real scheduling** | Date + time (24 h), repeat **once / every day / weekdays**, unlimited alarms |
 | 🔊 **Volume you control** | Per-alarm volume, **fade-in** over N seconds, optional "force the system volume up" when ringing |
 | 🔈 **Output per alarm** | Each alarm picks its **own output device** — bedroom speakers for the wake-up, headset for the meeting reminder. Falls back to the system default (and says so) if the device is unplugged |
+| 📡 **AirPlay (macOS)** | Alarms can play on **HomePod, Apple TV or any AirPlay speaker** — the same devices you pick in the Mac's Sound menu. Routed through the Music app; if the speaker is offline the alarm still rings on the Mac |
 | 😴 **Sleep-proof** | Keeps the computer awake while an alarm is armed; optionally registers a **real OS wake** one minute before the alarm (macOS `pmset`, Windows wake timer, Linux `rtcwake`) |
 | ⏱ **Catch-up** | If the machine was asleep at alarm time, it rings as soon as it wakes (up to 30 min late); older alarms are reported as *missed*, never silently dropped |
 | 🛑 **Big red STOP** | One click, or Enter / Esc. Snooze with one click. Ring timeout so a forgotten alarm doesn't play forever |
@@ -95,6 +96,15 @@ The app must be running for alarms to ring (closing it with an alarm armed asks 
 | **Wake from sleep** 1 min before the alarm | `pmset schedule wake` — asks for your password once per change | waitable timer with resume flag — allow *wake timers* in the power plan | `rtcwake` via `pkexec` |
 
 The indicator row always says what is true *right now*. If the password prompt is declined, it says **OS wake NOT registered** and offers **Retry** — it never nags. Laptops with the lid closed may only "dark-wake" and stay silent: keep the lid open or plug in a display.
+
+## AirPlay speakers (macOS)
+
+Open the *Play on* list and choose **AirPlay speakers…** (or press ↻) — the app asks the Music app for the AirPlay devices it can see and lists them as `AirPlay: LivingRoom (HomePod)`. Pick one and save the alarm. At ring time the app launches Music (it pre-launches it 3 minutes early), routes Music to that speaker, plays your file, fades the volume in, and when you press STOP it removes the temporary track and restores Music's previous speaker selection and volume.
+
+- The first time, macOS asks whether the launcher (Terminal, or the standalone app) may control **Music** — click *Allow*. If you clicked *Don't Allow*, turn it on in *System Settings → Privacy & Security → Automation*.
+- Offline speaker at ring time → the alarm rings on the Mac's default output and the form says why.
+- One AirPlay speaker per alarm (multi-room is on the wish list).
+- Windows / Linux: AirPlay entries are simply not offered.
 
 ## Microphone permission (macOS)
 

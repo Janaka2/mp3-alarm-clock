@@ -13,6 +13,13 @@ description: Audio playback (pygame-ce, imported as pygame.mixer) and microphone
 - `set_system_volume()` is best effort and platform specific (osascript / pactl / VK_VOLUME_UP). Runs in a thread when ringing because osascript can take a second. Never let it block the ring.
 - `PYGAME_HIDE_SUPPORT_PROMPT=1` is set before import to keep the console quiet.
 
+## AirPlay – `AirPlayPlayer` (macOS, via the Music app)
+- Output values `airplay:<name>`. SDL/CoreAudio cannot target a specific AirPlay receiver, so playback goes through Music with osascript: select `current AirPlay devices`, `add` the file to the library, `play`, and on stop `delete` the temporary track and restore the previous speaker selection + `sound volume`.
+- Every Music call is a subprocess (0.1–3 s; longer if Music must launch) → `play()`/`stop()` run in worker threads (`App._play_airplay`, `App._stop_airplay`); results come back through `App.events` as `("notice", …)` / `("airplay_failed", …)`. Failure → fall back to the local default output and say why (offline speaker, Automation permission -1743).
+- Fade-in for AirPlay happens inside `AirPlayPlayer.play` (1 step/s) because Tk `after` steps would each cost an osascript round-trip. The slider is debounced to one call per 400 ms.
+- `devices()` only queries Music when it is already running unless `launch=True` (↻ button / list entry) – opening the alarm clock must never open Music. `prewarm()` launches Music 3 min before an AirPlay alarm.
+- Test without waking the household: route to the computer's own AirPlay entry (`"<Mac name>"`), which exercises the identical code path. Never send test audio to a HomePod unasked.
+
 ## Recording – `Recorder` (sounddevice)
 - `RawInputStream(dtype='int16', channels=1)` → bytes chunks → `wave` module. No numpy dependency on purpose (keeps the portable install small); level meter = max|sample| over the chunk via `array('h')`.
 - Sample rate: device default (`query_devices(dev)['default_samplerate']`), fallback 44100.

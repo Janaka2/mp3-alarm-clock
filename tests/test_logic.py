@@ -34,6 +34,10 @@ def test_alarm_output_roundtrip():
     assert ac.new_alarm()["output"] == ""                     # default = system output
     old = dict(a); del old["output"]                          # alarms.json from before this feature
     assert old.get("output", "") == ""
+    assert ac.output_label("") == "default"
+    assert ac.output_label("airplay:LivingRoom") == "AirPlay: LivingRoom"
+    assert ac.output_label("Mac mini Speakers") == "Mac mini Speakers"
+    assert ac.AirPlayPlayer._q('He said "hi"') == 'He said \\"hi\\"'
 
 
 def test_scheduler():
