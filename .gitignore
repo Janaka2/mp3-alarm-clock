@@ -1,0 +1,18 @@
+# local environment & build output
+.venv/
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+
+# user data (lives next to the app, never committed)
+alarms.json
+alarms.json.tmp
+alarmclock.log
+recordings/*
+!recordings/.gitkeep
+
+# OS noise
+.DS_Store
+Thumbs.db
