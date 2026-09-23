@@ -47,9 +47,12 @@ def test_normalize():
     out, peak, gain = ac.normalize_int16(quiet)
     assert 0.008 < peak < 0.012 and 35 < gain <= 40.0
     assert max(abs(x) for x in out) > 0.8 * 32767 and abs(sum(out) / len(out)) < 200
-    loud = array("h", [int(30000 * math.sin(i / 10)) for i in range(4000)])
+    loud = array("h", [int(30000 * math.sin(2 * math.pi * i / 100)) for i in range(4000)])   # whole periods: no DC
     out2, peak2, gain2 = ac.normalize_int16(loud)
     assert gain2 == 0.0 and out2 is loud                                       # already fine: untouched
+    offset = array("h", [x + 500 for x in loud])                              # loud but with a DC offset
+    out3, peak3, gain3 = ac.normalize_int16(offset)
+    assert gain3 == 0.0 and abs(sum(out3) / len(out3)) < 64 and max(out3) <= 30001   # offset removed, not attenuated
     silence = array("h", [0] * 1000)
     assert ac.normalize_int16(silence)[1] == 0.0
     assert ac.normalize_int16(array("h"))[1] == 0.0

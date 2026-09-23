@@ -478,7 +478,7 @@ def normalize_int16(samples: array) -> tuple[array, float, float]:
     peak = max(abs(x - dc) for x in samples)
     if peak == 0:
         return samples, 0.0, 0.0
-    gain = min(NORMALIZE_TARGET * 32767 / peak, 10 ** (NORMALIZE_MAX_DB / 20))
+    gain = max(1.0, min(NORMALIZE_TARGET * 32767 / peak, 10 ** (NORMALIZE_MAX_DB / 20)))   # boost only, never attenuate
     if gain < 1.02 and abs(dc) < 64:      # already loud enough, no meaningful offset: leave untouched
         return samples, peak / 32768, 0.0
     out = array("h", (max(-32768, min(32767, int((x - dc) * gain))) for x in samples))
