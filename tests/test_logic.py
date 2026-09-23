@@ -24,6 +24,18 @@ def test_next_fire():
     assert ac.next_round_hour(datetime(2026, 9, 23, 23, 5)) == datetime(2026, 9, 24, 0, 0)
 
 
+def test_alarm_output_roundtrip():
+    tmp = tempfile.mkdtemp()
+    store = ac.AlarmStore(os.path.join(tmp, "alarms.json"))
+    a = ac.new_alarm({"last_output": "Bedroom Speakers"}); assert a["output"] == "Bedroom Speakers"
+    store.upsert(a)
+    again = ac.AlarmStore(store.path)
+    assert again.alarms[0]["output"] == "Bedroom Speakers"
+    assert ac.new_alarm()["output"] == ""                     # default = system output
+    old = dict(a); del old["output"]                          # alarms.json from before this feature
+    assert old.get("output", "") == ""
+
+
 def test_scheduler():
     tmp = tempfile.mkdtemp()
     store = ac.AlarmStore(os.path.join(tmp, "alarms.json"))
@@ -44,4 +56,4 @@ def test_scheduler():
 
 
 if __name__ == "__main__":
-    test_next_fire(); test_scheduler(); print("OK")
+    test_next_fire(); test_alarm_output_roundtrip(); test_scheduler(); print("OK")

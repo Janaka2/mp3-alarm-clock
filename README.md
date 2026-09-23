@@ -22,6 +22,7 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 | 🎵 **Any sound** | MP3, WAV, OGG, FLAC — pick a file, or **record from the microphone** and use the recording as the alarm |
 | 📅 **Real scheduling** | Date + time (24 h), repeat **once / every day / weekdays**, unlimited alarms |
 | 🔊 **Volume you control** | Per-alarm volume, **fade-in** over N seconds, optional "force the system volume up" when ringing |
+| 🔈 **Output per alarm** | Each alarm picks its **own output device** — bedroom speakers for the wake-up, headset for the meeting reminder. Falls back to the system default (and says so) if the device is unplugged |
 | 😴 **Sleep-proof** | Keeps the computer awake while an alarm is armed; optionally registers a **real OS wake** one minute before the alarm (macOS `pmset`, Windows wake timer, Linux `rtcwake`) |
 | ⏱ **Catch-up** | If the machine was asleep at alarm time, it rings as soon as it wakes (up to 30 min late); older alarms are reported as *missed*, never silently dropped |
 | 🛑 **Big red STOP** | One click, or Enter / Esc. Snooze with one click. Ring timeout so a forgotten alarm doesn't play forever |
@@ -60,14 +61,15 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 ```
 ┌ Alarms ──────────────────────────────────────────────────────────────────┐
-│ On  Next ring          Repeat    Label        Sound              Vol     │
-│ ✔   Thu 24 Sep 07:00   weekdays  Work         wakeup.mp3         80      │
-│ ✔   Sat 26 Sep 09:30   once      Flight!      voice_2026-09-…    100     │
+│ On  Next ring          Repeat    Label     Sound           Output      Vol│
+│ ✔   Thu 24 Sep 07:00   weekdays  Work      wakeup.mp3      Speakers    80 │
+│ ✔   Sat 26 Sep 09:30   once      Flight!   voice_2026-…    Headset     100│
 ├ Alarm details ───────────────────────────────────────────────────────────┤
 │ Label [Work        ]   Repeat (•) Once ( ) Every day ( ) Weekdays        │
 │ Date  [2026]-[09]-[24] [Today][Tomorrow]   Time [07]:[00] [+1 min][+10]  │
 │ Sound [~/Music/wakeup.mp3                 ] [Browse…] [▶ Test] [■ Stop]  │
 │ Volume ────────●──────── 80 %         Ring for up to [10] min            │
+│ Play on [Mac mini Speakers        ▾] [↻]                                 │
 │ Record voice [Built-in Microphone ▾] [● Record] ▮▮▮▮▯▯▯ 00:04            │
 │ [Add alarm] [Clear form]                                                 │
 ├ Sleep / power ───────────────────────────────────────────────────────────┤
@@ -78,7 +80,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-1. **Sound** — `Browse…` for a file, or choose a microphone, press `● Record`, speak, press `■ Stop`. The recording is saved to `recordings/` and selected automatically. `▶ Test` plays at the slider volume.
+1. **Sound** — `Browse…` for a file, or choose a microphone, press `● Record`, speak, press `■ Stop`. The recording is saved to `recordings/` and selected automatically. Pick the **output device** in *Play on*; `▶ Test` plays at the slider volume on that device.
 2. **When** — date, time, repeat. `+1 min` is handy to try a sound for real.
 3. **Add alarm.** The list shows the next ring time and the status bar counts down.
 4. **When it rings** a window pops on top with a big **STOP** and **Snooze**; the main window shows a red STOP bar too; volume fades in.

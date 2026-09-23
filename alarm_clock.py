@@ -87,6 +87,7 @@ DEFAULT_SETTINGS = {
     "last_sound": "",
     "last_volume": 80,
     "last_repeat": "once",
+    "last_output": "",           # "" = system default output device
 }
 
 
@@ -106,6 +107,7 @@ def new_alarm(settings: dict | None = None) -> dict:
         "time": when.strftime("%H:%M"),
         "repeat": s.get("last_repeat", "once"),   # once | daily | weekdays
         "sound": last_sound if os.path.isfile(last_sound) else "",
+        "output": s.get("last_output", ""),       # sound output device name, "" = system default
         "volume": int(s.get("last_volume", 80)),
         "ring_minutes": 10,
         "enabled": True,
@@ -202,6 +204,7 @@ class Player:
     def __init__(self):
         self.ok = False
         self.error = ""
+        self.device: str | None = None      # None = system default output
         try:
             import pygame  # noqa: F401
             pygame.mixer.init()
@@ -210,13 +213,44 @@ class Player:
             self.error = str(e)
             log(f"Audio init failed: {e}")
 
-    def play(self, path: str, volume: int, loop: bool = True) -> None:
+    @staticmethod
+    def output_devices() -> list[str]:
+        """Names of the sound output devices SDL can see (speakers, headsets, HDMI…)."""
+        try:
+            from pygame._sdl2 import audio
+            return list(audio.get_audio_device_names(False))
+        except Exception as e:
+            log(f"could not list output devices: {e}")
+            return []
+
+    def _ensure_device(self, device: str) -> str:
+        """Re-open the mixer on `device` ('' = system default).  Returns a warning if it had to fall back."""
+        import pygame
+        wanted = device or None
+        if wanted == self.device and pygame.mixer.get_init():
+            return ""
+        pygame.mixer.quit()
+        try:
+            pygame.mixer.init(devicename=wanted)
+            self.device = wanted
+            log(f"audio output: {wanted or 'system default'}")
+            return ""
+        except Exception as e:
+            log(f"output device '{wanted}' unavailable ({e}); falling back to system default")
+            pygame.mixer.init()
+            self.device = None
+            return f"Output “{device}” is not available right now, so it is playing on the system default output."
+
+    def play(self, path: str, volume: int, loop: bool = True, device: str = "") -> str:
+        """Start playback.  Returns '' or a plain-language warning (e.g. output device fell back)."""
         import pygame
         if not self.ok:
             raise RuntimeError(self.error or "audio not initialised")
+        warning = self._ensure_device(device)
         pygame.mixer.music.load(path)
         pygame.mixer.music.set_volume(max(0, min(100, volume)) / 100.0)
         pygame.mixer.music.play(-1 if loop else 0)
+        return warning
 
     def set_volume(self, volume: int) -> None:
         if self.ok:
@@ -649,13 +683,13 @@ class App(tk.Tk):
         # Alarm list
         top = ttk.LabelFrame(self, text="Alarms")
         top.pack(fill="both", expand=True, padx=10, pady=(10, 4))
-        cols = ("on", "when", "repeat", "label", "sound", "vol")
+        cols = ("on", "when", "repeat", "label", "sound", "output", "vol")
         self.tree = ttk.Treeview(top, columns=cols, show="headings", height=6, selectmode="browse")
         heads = {"on": ("On", 40), "when": ("Next ring", 150), "repeat": ("Repeat", 80),
-                 "label": ("Label", 140), "sound": ("Sound", 260), "vol": ("Vol", 40)}
+                 "label": ("Label", 130), "sound": ("Sound", 200), "output": ("Output", 150), "vol": ("Vol", 40)}
         for c in cols:
             self.tree.heading(c, text=heads[c][0])
-            self.tree.column(c, width=heads[c][1], anchor="w", stretch=(c in ("label", "sound")))
+            self.tree.column(c, width=heads[c][1], anchor="w", stretch=(c in ("label", "sound", "output")))
         self.tree.pack(fill="both", expand=True, side="top", padx=6, pady=6)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", lambda e: self._toggle_selected())
@@ -733,10 +767,21 @@ class App(tk.Tk):
         ttk.Spinbox(rf, from_=1, to=120, width=4, textvariable=self.v_ring).pack(side="left")
         ttk.Label(rf, text="min").pack(side="left", padx=4)
 
+        # Output device (per alarm)
+        ttk.Label(ed, text="Play on").grid(row=4, column=0, sticky="w", **pad)
+        of = ttk.Frame(ed)
+        of.grid(row=4, column=1, columnspan=7, sticky="we", **pad)
+        self.v_output = tk.StringVar(value=self.DEFAULT_OUTPUT)
+        self.cb_output = ttk.Combobox(of, textvariable=self.v_output, state="readonly", width=34)
+        self.cb_output.pack(side="left")
+        ttk.Button(of, text="↻", width=2, command=self._refresh_outputs).pack(side="left", padx=(2, 8))
+        ttk.Label(of, text="speakers / headset / HDMI – chosen per alarm", foreground="#666").pack(side="left")
+        self._refresh_outputs()
+
         # Recorder
-        ttk.Label(ed, text="Record voice").grid(row=4, column=0, sticky="w", **pad)
+        ttk.Label(ed, text="Record voice").grid(row=5, column=0, sticky="w", **pad)
         rcf = ttk.Frame(ed)
-        rcf.grid(row=4, column=1, columnspan=7, sticky="we", **pad)
+        rcf.grid(row=5, column=1, columnspan=7, sticky="we", **pad)
         self.devices = Recorder.input_devices()
         self.v_mic = tk.StringVar(value=self.devices[0][1] if self.devices else "No microphone found")
         self.cb_mic = ttk.Combobox(rcf, textvariable=self.v_mic, state="readonly", width=34,
@@ -752,7 +797,7 @@ class App(tk.Tk):
 
         # Save row
         sv = ttk.Frame(ed)
-        sv.grid(row=5, column=0, columnspan=8, sticky="we", **pad)
+        sv.grid(row=6, column=0, columnspan=8, sticky="we", **pad)
         self.b_save = ttk.Button(sv, text="Add alarm", command=self._save)
         self.b_save.pack(side="left")
         ttk.Button(sv, text="Clear form", command=self._new).pack(side="left", padx=6)
@@ -818,6 +863,29 @@ class App(tk.Tk):
         # (packed only while ringing – see _ring / _dismiss)
 
     # ----- form helpers
+    DEFAULT_OUTPUT = "System default output"
+
+    def _refresh_outputs(self) -> None:
+        names = Player.output_devices()
+        current = self.v_output.get()
+        self.cb_output["values"] = [self.DEFAULT_OUTPUT] + names
+        if current not in self.cb_output["values"]:
+            self.v_output.set(self.DEFAULT_OUTPUT)
+
+    def _set_output(self, name: str) -> None:
+        """Show an alarm's output device in the combobox, even if that device is currently unplugged."""
+        values = list(self.cb_output["values"])
+        if name and name not in values:
+            values.append(name + "  (not connected)")
+            self.cb_output["values"] = values
+            self.v_output.set(name + "  (not connected)")
+        else:
+            self.v_output.set(name or self.DEFAULT_OUTPUT)
+
+    def _get_output(self) -> str:
+        v = self.v_output.get().replace("  (not connected)", "")
+        return "" if v == self.DEFAULT_OUTPUT else v
+
     def _set_date(self, d: date) -> None:
         self.v_year.set(f"{d.year:04d}"); self.v_month.set(f"{d.month:02d}"); self.v_day.set(f"{d.day:02d}")
 
@@ -833,6 +901,7 @@ class App(tk.Tk):
         self.v_hour.set(h); self.v_min.set(m)
         self.v_repeat.set(a["repeat"])
         self.v_sound.set(a["sound"])
+        self._set_output(a.get("output", ""))
         self.v_volume.set(a["volume"])
         self.v_ring.set(str(a.get("ring_minutes", 10)))
         self._on_volume()
@@ -865,6 +934,7 @@ class App(tk.Tk):
             "time": f"{h:02d}:{m:02d}",
             "repeat": self.v_repeat.get(),
             "sound": sound,
+            "output": self._get_output(),
             "volume": int(self.v_volume.get()),
             "ring_minutes": ring,
             "enabled": True,
@@ -887,7 +957,7 @@ class App(tk.Tk):
             return
         # remember what the user chose so the next new alarm starts from it
         self.store.settings.update({"last_sound": a["sound"], "last_volume": a["volume"],
-                                    "last_repeat": a["repeat"]})
+                                    "last_repeat": a["repeat"], "last_output": a.get("output", "")})
         self.store.upsert(a)
         self.scheduler.ringing.discard(a["id"])
         self._refresh_list(select=a["id"])
@@ -948,7 +1018,8 @@ class App(tk.Tk):
             messagebox.showerror(APP_NAME, "Choose a sound file first.")
             return
         try:
-            self.player.play(p, self.v_volume.get(), loop=False)
+            warning = self.player.play(p, self.v_volume.get(), loop=False, device=self._get_output())
+            self.l_form_hint.config(text=warning or f"Playing on {self._get_output() or 'system default output'}")
         except Exception as e:
             log(f"test playback failed for {p}: {e}")
             messagebox.showerror(APP_NAME, f"Could not play {os.path.basename(p)}.\n\n"
@@ -1039,7 +1110,7 @@ class App(tk.Tk):
             when = f"{nf:%a %d %b %H:%M}" if nf else ("—" if not a["enabled"] else "?")
             self.tree.insert("", "end", iid=a["id"], values=(
                 "✔" if a["enabled"] else "", when, a["repeat"], a["label"],
-                os.path.basename(a["sound"]), a["volume"]))
+                os.path.basename(a["sound"]), a.get("output") or "default", a["volume"]))
         if select and self.tree.exists(select):
             self.tree.selection_set(select)
 
@@ -1121,7 +1192,10 @@ class App(tk.Tk):
                        "It may have been moved or deleted. Pick another file in Alarm details and save.")
         else:
             try:
-                self.player.play(a["sound"], 0 if fade else a["volume"], loop=True)
+                warning = self.player.play(a["sound"], 0 if fade else a["volume"], loop=True,
+                                           device=a.get("output", ""))
+                if warning:
+                    self.l_form_hint.config(text=warning)
                 if fade:
                     self._start_fade(a["volume"], fade)
             except Exception as e:
