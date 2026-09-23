@@ -22,6 +22,9 @@ description: Audio playback (pygame-ce, imported as pygame.mixer) and microphone
 
 ## Recording – `Recorder` (sounddevice)
 - `RawInputStream(dtype='int16', channels=1)` → bytes chunks → `wave` module. No numpy dependency on purpose (keeps the portable install small); level meter = max|sample| over the chunk via `array('h')`.
+- **Level normalisation** (`normalize_int16`): every take gets DC-offset removal and peak normalisation to -1 dBFS, capped at +40 dB. USB/Bluetooth headsets and webcams routinely deliver -30…-45 dBFS peaks (measured on the author's machine: 0.6–10 % of full scale) and macOS exposes no input gain for many of them (`osascript -e 'get volume settings'` → `input volume:missing value`), so software gain is the only fix. Peak < 0.3 % = "almost nothing recorded" → warn with the mic name (wrong device, muted boom, or no mic permission).
+- The UI shows the peak live and turns red after 2 s if the take is still below 2 % – the user must learn *while recording* that the wrong mic is selected, not after.
+- The default entry names the actual default device: `System default microphone  (CORSAIR HS80…)`.
 - Sample rate: device default (`query_devices(dev)['default_samplerate']`), fallback 44100.
 - Output path: `recordings/voice_YYYY-MM-DD_HH-MM-SS.wav` next to the app; after Stop the path is put straight into the Sound field so "record → save alarm" is two clicks.
 - Device list = `[(None, 'System default microphone')] + inputs with max_input_channels > 0`. Provide the ↻ refresh button because Bluetooth headsets appear/disappear.

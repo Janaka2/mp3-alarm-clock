@@ -19,7 +19,7 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 
 | | |
 |---|---|
-| 🎵 **Any sound** | MP3, WAV, OGG, FLAC — pick a file, or **record from the microphone** and use the recording as the alarm |
+| 🎵 **Any sound** | MP3, WAV, OGG, FLAC — pick a file, or **record from the microphone** and use the recording as the alarm. Quiet mics are **auto-boosted** to a healthy level, and the app warns while recording if the chosen mic is picking up nothing |
 | 📅 **Real scheduling** | Date + time (24 h), repeat **once / every day / weekdays**, unlimited alarms |
 | 🔊 **Volume you control** | Per-alarm volume, **fade-in** over N seconds, optional "force the system volume up" when ringing |
 | 🔈 **Output per alarm** | Each alarm picks its **own output device** — bedroom speakers for the wake-up, headset for the meeting reminder. Falls back to the system default (and says so) if the device is unplugged |

@@ -461,8 +461,32 @@ def set_system_volume(percent: int) -> None:
 
 
 # --------------------------------------------------------------------------- recording
+NORMALIZE_TARGET = 0.9      # peak after normalisation (of full scale)
+NORMALIZE_MAX_DB = 40.0     # never boost more than this (pure noise would just get loud)
+QUIET_PEAK = 0.003          # below this the take is treated as "nothing recorded"
+
+
+def normalize_int16(samples: array) -> tuple[array, float, float]:
+    """Remove DC offset and peak-normalise 16-bit samples.
+    Returns (samples, original_peak_fraction, gain_db).  Quiet microphones (USB headsets, webcams)
+    often deliver -30…-45 dBFS; without this the alarm would be barely audible."""
+    import math
+    n = len(samples)
+    if n == 0:
+        return samples, 0.0, 0.0
+    dc = int(sum(samples) / n)
+    peak = max(abs(x - dc) for x in samples)
+    if peak == 0:
+        return samples, 0.0, 0.0
+    gain = min(NORMALIZE_TARGET * 32767 / peak, 10 ** (NORMALIZE_MAX_DB / 20))
+    if gain < 1.02 and abs(dc) < 64:      # already loud enough, no meaningful offset: leave untouched
+        return samples, peak / 32768, 0.0
+    out = array("h", (max(-32768, min(32767, int((x - dc) * gain))) for x in samples))
+    return out, peak / 32768, 20 * math.log10(gain)
+
+
 class Recorder:
-    """Records mono 16-bit WAV from a chosen input device using sounddevice."""
+    """Records mono 16-bit WAV from a chosen input device using sounddevice, then normalises the level."""
 
     SAMPLE_RATE = 44100
 
@@ -470,8 +494,11 @@ class Recorder:
         self.stream = None
         self.frames: list[bytes] = []
         self.level = 0.0
+        self.peak = 0.0            # loudest level seen during the current take (0..1)
         self.started_at = 0.0
         self.path = ""
+        self.last_peak = 0.0       # peak of the last take before normalisation
+        self.last_gain_db = 0.0    # boost applied to the last take
 
     @staticmethod
     def input_devices() -> list[tuple[int | None, str]]:
@@ -480,7 +507,11 @@ class Recorder:
         except Exception as e:
             log(f"sounddevice not available: {e}")
             return []
-        out = [(None, "System default microphone")]
+        try:
+            default_name = sd.query_devices(kind="input")["name"]
+        except Exception:
+            default_name = "none found"
+        out = [(None, f"System default microphone  ({default_name})")]
         for i, d in enumerate(sd.query_devices()):
             if d.get("max_input_channels", 0) > 0:
                 out.append((i, d["name"]))
@@ -492,6 +523,7 @@ class Recorder:
         self.path = os.path.join(out_dir, f"voice_{datetime.now():%Y-%m-%d_%H-%M-%S}.wav")
         self.frames = []
         self.level = 0.0
+        self.peak = 0.0
         rate = self.SAMPLE_RATE
         if device is not None:
             try:
@@ -505,6 +537,7 @@ class Recorder:
             self.frames.append(data)
             samples = array("h", data)
             self.level = (max(abs(s) for s in samples) / 32768.0) if samples else 0.0
+            self.peak = max(self.peak, self.level)
 
         self.stream = sd.RawInputStream(samplerate=rate, channels=1, dtype="int16",
                                         device=device, callback=cb)
@@ -517,12 +550,14 @@ class Recorder:
             self.stream.stop()
             self.stream.close()
             self.stream = None
+        samples, self.last_peak, self.last_gain_db = normalize_int16(array("h", b"".join(self.frames)))
         with wave.open(self.path, "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
             w.setframerate(self.rate)
-            w.writeframes(b"".join(self.frames))
+            w.writeframes(samples.tobytes())
         self.frames = []
+        log(f"recording saved {os.path.basename(self.path)}: peak {self.last_peak*100:.1f}% → boosted {self.last_gain_db:+.0f} dB")
         return self.path
 
     @property
@@ -1287,8 +1322,20 @@ class App(tk.Tk):
                 return
             self.b_rec.config(text="● Record")
             self.meter["value"] = 0
-            self.l_rec.config(text=f"Saved {os.path.basename(path)}")
             self.v_sound.set(path)
+            peak, gain = self.recorder.last_peak, self.recorder.last_gain_db
+            if peak < QUIET_PEAK:
+                self.l_rec.config(text="Almost nothing was recorded", foreground="#c62828")
+                messagebox.showwarning(APP_NAME, "Almost nothing was recorded.\n\n"
+                                       f"Microphone used: {self.v_mic.get()}\n\n"
+                                       "Either this is not the microphone you are speaking into, its mute switch "
+                                       "is on (headset booms often mute when flipped up), or macOS has not "
+                                       "allowed this app to use the microphone (System Settings → Privacy & "
+                                       "Security → Microphone). Pick another microphone in the list and try again.")
+            elif gain >= 6:
+                self.l_rec.config(text=f"Saved – was quiet ({peak*100:.0f}%), boosted {gain:+.0f} dB", foreground="#e65100")
+            else:
+                self.l_rec.config(text=f"Saved {os.path.basename(path)} (level {peak*100:.0f}%)", foreground="")
             return
         dev = next((d[0] for d in self.devices if d[1] == self.v_mic.get()), None)
         try:
@@ -1299,14 +1346,19 @@ class App(tk.Tk):
                                  "microphone in System Settings → Privacy & Security → Microphone.")
             return
         self.b_rec.config(text="■ Stop")
-        self.l_rec.config(text="Recording…")
+        self.l_rec.config(text="Recording…", foreground="")
         self._update_meter()
 
     def _update_meter(self) -> None:
         if not self.recorder.recording:
             return
         self.meter["value"] = min(100, self.recorder.level * 140)
-        self.l_rec.config(text=f"Recording… {int(self.recorder.elapsed)} s")
+        secs = self.recorder.elapsed
+        if secs > 2 and self.recorder.peak < 0.02:
+            self.l_rec.config(text=f"Recording… {int(secs)} s – very quiet! Is “{self.v_mic.get()[:28]}” the right mic?",
+                              foreground="#c62828")
+        else:
+            self.l_rec.config(text=f"Recording… {int(secs)} s   (peak {self.recorder.peak*100:.0f}%)", foreground="")
         self.after(80, self._update_meter)
 
     def _settings_changed(self) -> None:

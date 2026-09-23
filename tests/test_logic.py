@@ -40,6 +40,21 @@ def test_alarm_output_roundtrip():
     assert ac.AirPlayPlayer._q('He said "hi"') == 'He said \\"hi\\"'
 
 
+def test_normalize():
+    from array import array
+    import math
+    quiet = array("h", [int(300 * math.sin(i / 10)) + 50 for i in range(4000)])   # ~1 % peak with DC offset
+    out, peak, gain = ac.normalize_int16(quiet)
+    assert 0.008 < peak < 0.012 and 35 < gain <= 40.0
+    assert max(abs(x) for x in out) > 0.8 * 32767 and abs(sum(out) / len(out)) < 200
+    loud = array("h", [int(30000 * math.sin(i / 10)) for i in range(4000)])
+    out2, peak2, gain2 = ac.normalize_int16(loud)
+    assert gain2 == 0.0 and out2 is loud                                       # already fine: untouched
+    silence = array("h", [0] * 1000)
+    assert ac.normalize_int16(silence)[1] == 0.0
+    assert ac.normalize_int16(array("h"))[1] == 0.0
+
+
 def test_scheduler():
     tmp = tempfile.mkdtemp()
     store = ac.AlarmStore(os.path.join(tmp, "alarms.json"))
@@ -60,4 +75,4 @@ def test_scheduler():
 
 
 if __name__ == "__main__":
-    test_next_fire(); test_alarm_output_roundtrip(); test_scheduler(); print("OK")
+    test_next_fire(); test_alarm_output_roundtrip(); test_normalize(); test_scheduler(); print("OK")
