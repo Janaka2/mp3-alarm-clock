@@ -352,7 +352,9 @@ end tell''', timeout=60)
         return devs
 
     # ----- playback (blocking – call from a worker thread)
-    def play(self, path: str, volume: int, device: str, loop: bool = True, fade_seconds: int = 0) -> None:
+    def play(self, path: str, volume: int, device: str, loop: bool = True, fade_seconds: int = 0,
+             on_started=None) -> None:
+        """Blocking.  With loop=False it returns when the track has ended (or stop() was called)."""
         self._stop_flag.clear()
         script = f'''tell application "Music"
 	set prevDevs to ""
@@ -375,6 +377,8 @@ end tell'''
             self._prev_devices = [d for d in "\t".join(prev).splitlines() if d]
             self.playing = True
         log(f"AirPlay: playing {os.path.basename(path)} on '{device}' via Music")
+        if on_started:
+            on_started()
         if fade_seconds:
             t0 = time.monotonic()
             while not self._stop_flag.is_set():
@@ -383,9 +387,9 @@ end tell'''
                 if frac >= 1.0:
                     break
                 self._stop_flag.wait(1.0)
-        if not loop:   # test playback: wait for the track to end, then tidy up
+        if not loop:   # preview or whole-file alarm: wait for the track to end, then tidy up
             while not self._stop_flag.is_set() and self.is_playing():
-                self._stop_flag.wait(1.0)
+                self._stop_flag.wait(3.0)   # one osascript per 3 s keeps a 2-hour file cheap
             self.stop()
 
     def set_volume(self, volume: int) -> None:
@@ -865,6 +869,7 @@ class App(tk.Tk):
         self.ring_windows: dict[str, tk.Toplevel] = {}
         self.ring_timeouts: dict[str, str] = {}
         self.once_play: dict[str, dict] = {}       # alarms in "play the whole file once" mode that are playing
+        self._local_owner: str | None = None       # alarm currently playing on the pygame stream
         self._fade_job: str | None = None
 
         self._build_ui()
@@ -1331,8 +1336,10 @@ class App(tk.Tk):
         """Start AirPlay playback in a worker thread; failures come back through the event queue."""
         def work():
             try:
-                self.airplay.play(path, volume, device, loop=loop, fade_seconds=fade)
-                self.events.put(("notice", alarm, f"Playing on AirPlay speaker “{device}” via Music"))
+                self.airplay.play(path, volume, device, loop=loop, fade_seconds=fade, on_started=lambda: self.events.put(
+                    ("notice", alarm, f"Playing on AirPlay speaker “{device}” via Music")))
+                if alarm is not None and not loop:      # play() returns once the whole file has ended
+                    self.events.put(("finished", alarm["id"], None))
             except Exception as e:
                 log(f"AirPlay playback failed ({device}): {e}")
                 self.events.put(("airplay_failed", alarm, f"{e}"))
@@ -1598,7 +1605,7 @@ class App(tk.Tk):
             nf = next_fire(a, now)
             self.tree.insert("", "end", iid=a["id"], tags=("on" if a["enabled"] else "off",), values=(
                 "●" if a["enabled"] else "○", a["time"], a["label"], repeat_txt.get(a["repeat"], a["repeat"]),
-                f"{nf:%a %d %b %H:%M}" if nf else "Off",
+                "Playing now" if a["id"] in self.once_play else (f"{nf:%a %d %b %H:%M}" if nf else "Off"),
                 ("▶ " if a.get("mode") == "play" else "") + os.path.basename(a["sound"]), output_label(a.get("output", ""))))
         if select and self.tree.exists(select):
             self.tree.selection_set(select)
@@ -1620,16 +1627,19 @@ class App(tk.Tk):
         now = datetime.now()
         s = self.store.settings
         if self.ring_windows:
-            self._set_pill(self.l_armed, "▶  Playing now" if self.once_play else "🔔  Ringing now", "ring")
+            playing_only = len(self.ring_windows) == len(self.once_play)
+            self._set_pill(self.l_armed, "▶  Playing now" if playing_only else "🔔  Ringing now", "ring")
         elif ev:
             self._set_pill(self.l_armed, f"●  Alarm set · rings in {fmt_delta(ev[0] - now)}", "good")
         else:
             self._set_pill(self.l_armed, "○  No alarm set", "neutral")
         if self.power.keeping_awake:
             self._set_pill(self.l_awake, "●  Computer will stay awake", "good")
+        elif self.ring_windows and not s.get("keep_awake"):
+            self._set_pill(self.l_awake, "△  Computer may fall asleep while playing (option is off)", "warn")
         elif ev and not s.get("keep_awake"):
             self._set_pill(self.l_awake, "△  Computer may fall asleep (option is off)", "warn")
-        elif ev:
+        elif ev or self.ring_windows:
             self._set_pill(self.l_awake, "△  Could not keep the computer awake", "bad")
         else:
             self._set_pill(self.l_awake, "○  Not keeping the computer awake", "neutral")
@@ -1685,7 +1695,8 @@ class App(tk.Tk):
                 elif kind == "notice":
                     self.l_form_hint.config(text=when)
                 elif kind == "finished":
-                    self._dismiss(a, finished=True)
+                    if a in self.once_play:           # ignore if the user already pressed STOP
+                        self._dismiss(a, finished=True)
                 elif kind == "airplay_failed":
                     self.l_form_hint.config(text=f"AirPlay failed: {when}  –  playing on this computer instead.")
                     self.bell()
@@ -1697,8 +1708,12 @@ class App(tk.Tk):
                             self.once_play[a["id"]].update(via="local", started=True)
                         try:
                             self.player.play(path, vol, loop=a is not None and not once, device="")
+                            if a is not None:
+                                self._take_local_stream(a["id"])
                         except Exception as e:
                             log(f"fallback playback failed: {e}")
+                            if once:
+                                self.after(0, lambda aid=a["id"]: self._dismiss(aid))
                 elif kind == "missed":
                     self._refresh_list()
                     messagebox.showwarning(APP_NAME, f"Alarm “{a['label']}” was missed (it was due {when:%a %H:%M} "
@@ -1728,6 +1743,7 @@ class App(tk.Tk):
             try:
                 warning = self.player.play(a["sound"], 0 if fade else a["volume"], loop=not once,
                                            device=a.get("output", ""))
+                self._take_local_stream(a["id"])
                 if once:
                     self.once_play[a["id"]]["started"] = True
                 if warning:
@@ -1743,6 +1759,11 @@ class App(tk.Tk):
         if problem:
             self.bell()
             self.after(100, lambda: messagebox.showerror(APP_NAME, problem))
+            if once:                              # nothing to wait for: no "Now playing" window
+                self.once_play.pop(a["id"], None)
+                self.scheduler.ringing.discard(a["id"])
+                self._refresh_list(); self._apply_power(); self._tick_indicators()
+                return
         self._refresh_list()
         self._apply_power()
 
@@ -1787,6 +1808,14 @@ class App(tk.Tk):
             win.focus_force()
         self._tick_indicators()
 
+    def _take_local_stream(self, aid: str) -> None:
+        """pygame has one music stream: note who owns it and close a whole-file play it just interrupted."""
+        self._local_owner = aid
+        for other, st in list(self.once_play.items()):
+            if other != aid and st["via"] == "local":
+                log(f"whole-file play {other} interrupted by {aid}")
+                self.after(0, lambda o=other: self._dismiss(o))
+
     def _watch_once(self, aid: str) -> None:
         """Whole-file mode: show elapsed time and stop when the file has finished playing."""
         st = self.once_play.get(aid)
@@ -1797,19 +1826,12 @@ class App(tk.Tk):
         if st["label"]:
             st["label"].config(text=f"{secs // 3600}:{secs % 3600 // 60:02d}:{secs % 60:02d} played")
         if st["via"] == "airplay":
-            if self.airplay and self.airplay.playing:
-                st["started"] = True
-                if secs % 5 == 0:                 # Music is slow to answer: ask in a worker thread, never the UI
-                    threading.Thread(target=self._check_airplay_done, args=(aid,), daemon=True).start()
+            pass                                  # the AirPlay worker posts "finished" when Music reaches the end
         elif st["started"] and not self.player.is_playing():
             self.events.put(("finished", aid, None))
             return
         self.after(1000, lambda: self._watch_once(aid))
 
-    def _check_airplay_done(self, aid: str) -> None:
-        if aid in self.once_play and self.airplay.playing and not self.airplay.is_playing():
-            self.events.put(("finished", aid, None))
-        self._tick_indicators()
 
     def _start_fade(self, target: int, seconds: int) -> None:
         if self._fade_job:
@@ -1845,6 +1867,12 @@ class App(tk.Tk):
         if t:
             self.after_cancel(t)
         self.scheduler.ringing.discard(alarm_id)
+        if alarm_id == self._local_owner:         # its sound must stop even if another alarm window is open
+            self._local_owner = None
+            self.player.stop()
+            if self._fade_job:
+                self.after_cancel(self._fade_job)
+                self._fade_job = None
         if not self.ring_windows:
             self.player.stop()
             self._stop_airplay()
@@ -1862,7 +1890,9 @@ class App(tk.Tk):
 
     def _on_close(self) -> None:
         if self.ring_windows:
-            if not messagebox.askyesno(APP_NAME, "An alarm is ringing right now. Quitting will silence it.\n\nQuit anyway?"):
+            msg = ("A file is still playing. Quitting will stop it." if self.once_play and len(self.ring_windows) == len(self.once_play)
+                   else "An alarm is ringing right now. Quitting will silence it.")
+            if not messagebox.askyesno(APP_NAME, msg + "\n\nQuit anyway?"):
                 return
         elif self.scheduler.next_event():
             if not messagebox.askyesno(APP_NAME, "An alarm is still armed. Alarms only ring while this window "
