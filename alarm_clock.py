@@ -1029,7 +1029,9 @@ class App(tk.Tk):
         ttk.Label(row, text="Your alarms", style="Title.TLabel").pack(side="left")
         ttk.Button(row, text="＋  New alarm", style="Accent.TButton", command=self._new).pack(side="right")
         cols = ("on", "time", "label", "repeat", "next", "sound", "output")
-        self.tree = ttk.Treeview(c1, columns=cols, show="headings", height=8, selectmode="browse")
+        # requested height is small on purpose: the list expands to fill the column, and a small request
+        # leaves room for the More options card below it even at the minimum window size
+        self.tree = ttk.Treeview(c1, columns=cols, show="headings", height=3, selectmode="browse")
         heads = {"on": ("", 36, "center"), "time": ("Time", 70, "w"), "label": ("Alarm", 130, "w"),
                  "repeat": ("Repeats", 95, "w"), "next": ("Next ring", 140, "w"), "sound": ("Sound", 105, "w"),
                  "output": ("Plays on", 105, "w")}
@@ -1229,11 +1231,9 @@ class App(tk.Tk):
         ttk.Label(r2, text="Snooze for", style="Card.TLabel").pack(side="left")
         ttk.Spinbox(r2, from_=1, to=60, width=3, textvariable=self.v_snooze).pack(side="left", padx=4)
         ttk.Label(r2, text="minutes", style="Card.TLabel").pack(side="left")
-        r3 = ttk.Frame(mc, style="Card.TFrame")
-        r3.pack(anchor="w", pady=(4, 4))
-        ttk.Label(r3, text="Fade the sound in over", style="Card.TLabel").pack(side="left")
-        ttk.Spinbox(r3, from_=0, to=120, width=3, textvariable=self.v_fade).pack(side="left", padx=4)
-        ttk.Label(r3, text="seconds", style="Card.TLabel").pack(side="left")
+        ttk.Label(r2, text="Fade the sound in over", style="Card.TLabel").pack(side="left", padx=(28, 0))
+        ttk.Spinbox(r2, from_=0, to=120, width=3, textvariable=self.v_fade).pack(side="left", padx=4)
+        ttk.Label(r2, text="seconds", style="Card.TLabel").pack(side="left")
         for var in (self.v_sysvol_level, self.v_snooze, self.v_fade):
             var.trace_add("write", lambda *_: self._settings_changed())
 
