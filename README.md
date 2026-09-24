@@ -104,6 +104,7 @@ requirements.txt            pygame-ce, sounddevice — that's all
 Start Alarm Clock.command   macOS launcher      Start Alarm Clock.bat   Windows launcher
 start_alarm_clock.sh        Linux launcher      build_standalone.sh     PyInstaller build
 tests/test_logic.py         headless tests for scheduling (next_fire, grace, snooze, missed)
+tools/make_screenshots.py   regenerates docs/screenshots/*.png from a throw-away sample alarms.json
 .claude/                    Claude Code skills + proactive review agents used to build this
 ```
 
