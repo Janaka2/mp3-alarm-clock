@@ -92,6 +92,7 @@ DEFAULT_SETTINGS = {
     "last_volume": 80,
     "last_repeat": "once",
     "last_output": "",           # "" = system default output device
+    "last_mode": "alarm",        # alarm = ring (loop) until stopped | play = play the whole file once
 }
 
 
@@ -113,6 +114,7 @@ def new_alarm(settings: dict | None = None) -> dict:
         "sound": last_sound if os.path.isfile(last_sound) else "",
         "output": s.get("last_output", ""),       # sound output device name, "" = system default
         "volume": int(s.get("last_volume", 80)),
+        "mode": s.get("last_mode", "alarm"),      # alarm | play (whole file once, e.g. a 2-hour talk)
         "ring_minutes": 10,
         "enabled": True,
         "last_fired": None,
@@ -862,6 +864,7 @@ class App(tk.Tk):
         self.editing_id: str | None = None
         self.ring_windows: dict[str, tk.Toplevel] = {}
         self.ring_timeouts: dict[str, str] = {}
+        self.once_play: dict[str, dict] = {}       # alarms in "play the whole file once" mode that are playing
         self._fade_job: str | None = None
 
         self._build_ui()
@@ -1095,10 +1098,25 @@ class App(tk.Tk):
                    command=lambda: self._set_datetime(datetime.now() + timedelta(minutes=1))).pack(side="left", padx=(0, 4))
         ttk.Button(quick, text="In 10 min", style="Soft.TButton",
                    command=lambda: self._set_datetime(datetime.now() + timedelta(minutes=10))).pack(side="left")
-        ttk.Label(quick, text="Stop ringing after", style="Muted.TLabel").pack(side="left", padx=(22, 6))
+        mode_row = ttk.Frame(when, style="Card.TFrame")
+        mode_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(mode_row, text="At that time:", style="Muted.TLabel").pack(side="left", padx=(2, 8))
+        self.v_mode = tk.StringVar(value="alarm")
+        seg = ttk.Frame(mode_row, style="Card.TFrame")
+        seg.pack(side="left")
+        for txt, val in (("Ring until I stop it", "alarm"), ("Play the whole file once", "play")):
+            ttk.Radiobutton(seg, text=txt, value=val, variable=self.v_mode, style="Seg.Toolbutton").pack(side="left", padx=(0, 3))
+        self.v_mode.trace_add("write", lambda *_: self._on_mode_change())
+        mode_row2 = ttk.Frame(when, style="Card.TFrame")
+        mode_row2.pack(fill="x", pady=(6, 0))
+        self.ring_len = ttk.Frame(mode_row2, style="Card.TFrame")
+        ttk.Label(self.ring_len, text="If nobody stops it, give up after", style="Muted.TLabel").pack(side="left", padx=(2, 6))
         self.v_ring = tk.StringVar(value="10")
-        ttk.Spinbox(quick, from_=1, to=120, width=3, textvariable=self.v_ring).pack(side="left")
-        ttk.Label(quick, text="minutes", style="Muted.TLabel").pack(side="left", padx=4)
+        ttk.Spinbox(self.ring_len, from_=1, to=120, width=3, textvariable=self.v_ring).pack(side="left")
+        ttk.Label(self.ring_len, text="minutes", style="Muted.TLabel").pack(side="left", padx=4)
+        self.l_mode_hint = ttk.Label(mode_row2, style="Muted.TLabel",
+                                     text="Plays from start to end and stops by itself – for long talks, sermons or albums.")
+        self._on_mode_change()
 
         ttk.Separator(grid).grid(row=1, column=0, columnspan=2, sticky="we", pady=14)
 
@@ -1230,6 +1248,17 @@ class App(tk.Tk):
         else:
             self.date_row.pack_forget()
 
+    def _on_mode_change(self) -> None:
+        """The give-up timeout only applies when ringing in a loop; a whole-file play stops on its own."""
+        if self.v_mode.get() == "play":
+            self.ring_len.pack_forget()
+            if not self.l_mode_hint.winfo_ismapped():
+                self.l_mode_hint.pack(side="left", padx=(2, 0))
+        else:
+            self.l_mode_hint.pack_forget()
+            if not self.ring_len.winfo_ismapped():
+                self.ring_len.pack(side="left")
+
     def _on_sound_change(self) -> None:
         p = self.v_sound.get().strip()
         if not p:
@@ -1332,6 +1361,7 @@ class App(tk.Tk):
         self._set_output(a.get("output", ""))
         self.v_volume.set(a["volume"])
         self.v_ring.set(str(a.get("ring_minutes", 10)))
+        self.v_mode.set(a.get("mode", "alarm"))
         self._on_volume()
         self.b_save.config(text="Save changes" if self.editing_id else "Save alarm")
         self.l_editor_title.config(text=f"Editing “{a['label']}”" if self.editing_id else "New alarm")
@@ -1366,6 +1396,7 @@ class App(tk.Tk):
             "output": self._get_output(),
             "volume": int(self.v_volume.get()),
             "ring_minutes": ring,
+            "mode": self.v_mode.get(),
             "enabled": True,
             "last_fired": None,
         })
@@ -1386,7 +1417,8 @@ class App(tk.Tk):
             return
         # remember what the user chose so the next new alarm starts from it
         self.store.settings.update({"last_sound": a["sound"], "last_volume": a["volume"],
-                                    "last_repeat": a["repeat"], "last_output": a.get("output", "")})
+                                    "last_repeat": a["repeat"], "last_output": a.get("output", ""),
+                                    "last_mode": a.get("mode", "alarm")})
         self.store.upsert(a)
         self.scheduler.ringing.discard(a["id"])
         self._refresh_list(select=a["id"])
@@ -1566,7 +1598,8 @@ class App(tk.Tk):
             nf = next_fire(a, now)
             self.tree.insert("", "end", iid=a["id"], tags=("on" if a["enabled"] else "off",), values=(
                 "●" if a["enabled"] else "○", a["time"], a["label"], repeat_txt.get(a["repeat"], a["repeat"]),
-                f"{nf:%a %d %b %H:%M}" if nf else "Off", os.path.basename(a["sound"]), output_label(a.get("output", ""))))
+                f"{nf:%a %d %b %H:%M}" if nf else "Off",
+                ("▶ " if a.get("mode") == "play" else "") + os.path.basename(a["sound"]), output_label(a.get("output", ""))))
         if select and self.tree.exists(select):
             self.tree.selection_set(select)
         if self.store.alarms:
@@ -1578,7 +1611,8 @@ class App(tk.Tk):
         s = self.store.settings
         ev = self.scheduler.next_event()
         armed = ev is not None
-        self.power.set_keep_awake(bool(s["keep_awake"]) and armed)
+        playing = bool(self.ring_windows)
+        self.power.set_keep_awake(bool(s["keep_awake"]) and (armed or playing))
         self.power.set_wake(ev[0] if (armed and s["schedule_wake"]) else None)
 
     def _tick_indicators(self) -> None:
@@ -1586,7 +1620,7 @@ class App(tk.Tk):
         now = datetime.now()
         s = self.store.settings
         if self.ring_windows:
-            self._set_pill(self.l_armed, "🔔  Ringing now", "ring")
+            self._set_pill(self.l_armed, "▶  Playing now" if self.once_play else "🔔  Ringing now", "ring")
         elif ev:
             self._set_pill(self.l_armed, f"●  Alarm set · rings in {fmt_delta(ev[0] - now)}", "good")
         else:
@@ -1650,14 +1684,19 @@ class App(tk.Tk):
                     self._ring(a, when)
                 elif kind == "notice":
                     self.l_form_hint.config(text=when)
+                elif kind == "finished":
+                    self._dismiss(a, finished=True)
                 elif kind == "airplay_failed":
                     self.l_form_hint.config(text=f"AirPlay failed: {when}  –  playing on this computer instead.")
                     self.bell()
                     if a is None or a["id"] in self.ring_windows:
                         path = a["sound"] if a else self.v_sound.get()
                         vol = int(a["volume"] if a else self.v_volume.get())
+                        once = a is not None and a["id"] in self.once_play
+                        if once:
+                            self.once_play[a["id"]].update(via="local", started=True)
                         try:
-                            self.player.play(path, vol, loop=a is not None, device="")
+                            self.player.play(path, vol, loop=a is not None and not once, device="")
                         except Exception as e:
                             log(f"fallback playback failed: {e}")
                 elif kind == "missed":
@@ -1675,16 +1714,22 @@ class App(tk.Tk):
         if s.get("force_system_volume") and not use_airplay:
             threading.Thread(target=set_system_volume, args=(s.get("system_volume", 80),), daemon=True).start()
         fade = int(s.get("fade_seconds", 20) or 0)
+        once = a.get("mode") == "play"           # whole file once, then stop by itself
+        if once:
+            self.once_play[a["id"]] = {"via": "airplay" if use_airplay else "local", "t0": time.monotonic(),
+                                       "started": False, "label": None}
         problem = ""
         if not os.path.isfile(a["sound"]):
             problem = (f"The sound file for “{a['label']}” is missing:\n{a['sound']}\n\n"
                        "It may have been moved or deleted. Choose another file below and save the alarm.")
         elif use_airplay:
-            self._play_airplay(a, a["sound"], int(a["volume"]), a["output"][len(AirPlayPlayer.PREFIX):], loop=True, fade=fade)
+            self._play_airplay(a, a["sound"], int(a["volume"]), a["output"][len(AirPlayPlayer.PREFIX):], loop=not once, fade=fade)
         else:
             try:
-                warning = self.player.play(a["sound"], 0 if fade else a["volume"], loop=True,
+                warning = self.player.play(a["sound"], 0 if fade else a["volume"], loop=not once,
                                            device=a.get("output", ""))
+                if once:
+                    self.once_play[a["id"]]["started"] = True
                 if warning:
                     self.l_form_hint.config(text=warning)
                 if fade:
@@ -1706,26 +1751,64 @@ class App(tk.Tk):
             return
         P, F = self.PALETTE, self.F
         win = tk.Toplevel(self, bg=P["header"])
-        win.title("⏰ " + a["label"])
-        win.attributes("-topmost", True)
+        win.title(("▶ " if once else "⏰ ") + a["label"])
+        if not once:                              # a two-hour talk must not pin a window over everything
+            win.attributes("-topmost", True)
         w, h = 600, 470
         win.geometry(f"{w}x{h}+{(win.winfo_screenwidth() - w) // 2}+{(win.winfo_screenheight() - h) // 3}")
         win.protocol("WM_DELETE_WINDOW", lambda: self._dismiss(a["id"]))
-        tk.Label(win, text="⏰  ALARM", font=F["small_b"], bg=P["header"], fg="#C7D0E4").pack(pady=(30, 0))
+        tk.Label(win, text="▶  NOW PLAYING" if once else "⏰  ALARM", font=F["small_b"], bg=P["header"], fg="#C7D0E4").pack(pady=(30, 0))
         tk.Label(win, text=f"{when:%H:%M}", font=F["ring_time"], bg=P["header"], fg="white").pack()
         tk.Label(win, text=a["label"], font=F["ring_name"], bg=P["header"], fg="white").pack()
-        tk.Label(win, text=f"{when:%A, %d %B}", font=F["base"], bg=P["header"], fg="#C7D0E4").pack(pady=(2, 22))
+        sub = tk.Label(win, text=f"{when:%A, %d %B}", font=F["base"], bg=P["header"], fg="#C7D0E4")
+        sub.pack(pady=(2, 22))
         ttk.Button(win, text="■   STOP", style="Stop.TButton", command=lambda: self._dismiss(a["id"])).pack()
-        ttk.Button(win, text=f"Snooze {s.get('snooze_minutes', 5)} minutes", style="Ghost.TButton",
-                   command=lambda: self._snooze(a)).pack(pady=(14, 0))
-        tk.Label(win, text="Enter or Esc also stops it", font=F["small"], bg=P["header"], fg="#8E9BB8").pack(pady=(14, 0))
+        if once:
+            sub.config(text=os.path.basename(a["sound"]))
+            self.once_play[a["id"]]["label"] = tk.Label(win, text="0:00:00 played", font=F["base"], bg=P["header"], fg="#C7D0E4")
+            self.once_play[a["id"]]["label"].pack(pady=(14, 0))
+            tk.Label(win, text="Stops by itself when the file ends  ·  Enter or Esc also stops it",
+                     font=F["small"], bg=P["header"], fg="#8E9BB8").pack(pady=(14, 0))
+        else:
+            ttk.Button(win, text=f"Snooze {s.get('snooze_minutes', 5)} minutes", style="Ghost.TButton",
+                       command=lambda: self._snooze(a)).pack(pady=(14, 0))
+            tk.Label(win, text="Enter or Esc also stops it", font=F["small"], bg=P["header"], fg="#8E9BB8").pack(pady=(14, 0))
         win.bind("<Return>", lambda e: self._dismiss(a["id"]))
         win.bind("<Escape>", lambda e: self._dismiss(a["id"]))
         self.ring_windows[a["id"]] = win
-        self.ring_timeouts[a["id"]] = self.after(int(a.get("ring_minutes", 10)) * 60_000,
-                                                 lambda: self._dismiss(a["id"], timed_out=True))
+        if once:
+            self.after(1000, lambda: self._watch_once(a["id"]))
+        else:
+            self.ring_timeouts[a["id"]] = self.after(int(a.get("ring_minutes", 10)) * 60_000,
+                                                     lambda: self._dismiss(a["id"], timed_out=True))
         self.b_stop.pack(fill="x", side="top", before=self.body)
-        self.deiconify(); self.lift(); win.lift(); win.focus_force()
+        self.deiconify(); self.lift(); win.lift()
+        if not once:
+            win.focus_force()
+        self._tick_indicators()
+
+    def _watch_once(self, aid: str) -> None:
+        """Whole-file mode: show elapsed time and stop when the file has finished playing."""
+        st = self.once_play.get(aid)
+        win = self.ring_windows.get(aid)
+        if not st or not win or not win.winfo_exists():
+            return
+        secs = int(time.monotonic() - st["t0"])
+        if st["label"]:
+            st["label"].config(text=f"{secs // 3600}:{secs % 3600 // 60:02d}:{secs % 60:02d} played")
+        if st["via"] == "airplay":
+            if self.airplay and self.airplay.playing:
+                st["started"] = True
+                if secs % 5 == 0:                 # Music is slow to answer: ask in a worker thread, never the UI
+                    threading.Thread(target=self._check_airplay_done, args=(aid,), daemon=True).start()
+        elif st["started"] and not self.player.is_playing():
+            self.events.put(("finished", aid, None))
+            return
+        self.after(1000, lambda: self._watch_once(aid))
+
+    def _check_airplay_done(self, aid: str) -> None:
+        if aid in self.once_play and self.airplay.playing and not self.airplay.is_playing():
+            self.events.put(("finished", aid, None))
         self._tick_indicators()
 
     def _start_fade(self, target: int, seconds: int) -> None:
@@ -1753,8 +1836,9 @@ class App(tk.Tk):
         self._dismiss(a["id"])
         self._apply_power()
 
-    def _dismiss(self, alarm_id: str, timed_out: bool = False) -> None:
+    def _dismiss(self, alarm_id: str, timed_out: bool = False, finished: bool = False) -> None:
         win = self.ring_windows.pop(alarm_id, None)
+        self.once_play.pop(alarm_id, None)
         if win:
             win.destroy()
         t = self.ring_timeouts.pop(alarm_id, None)
@@ -1770,6 +1854,8 @@ class App(tk.Tk):
                 self._fade_job = None
         if timed_out:
             log(f"alarm {alarm_id} stopped after ring timeout")
+        if finished:
+            log(f"alarm {alarm_id} finished playing its file")
         self._refresh_list()
         self._apply_power()
         self._tick_indicators()

@@ -41,3 +41,8 @@ The product is judged on details people feel every morning, not on the framework
 - Does the status bar tell the truth about armed / awake / wake-registered right now?
 - Does a brand-new alarm still work with zero edits?
 - Did an error path fall back to a stack trace instead of a sentence? (see [[plain-language-errors]])
+
+## Two play modes (since 2026-09-24)
+- `alarm["mode"]`: `alarm` = loop the file until STOP / snooze / `ring_minutes` timeout (classic). `play` = play the file once from start to end (long talks, 2-hour sermons, albums) and stop by itself; no timeout, no snooze, window not topmost, no focus stealing, elapsed-time counter, `_watch_once` polls `player.is_playing()` (pygame) or Music every 5 s in a worker thread (AirPlay) and posts `("finished", aid, None)`.
+- Keep-awake must also hold while anything is playing (`_apply_power`: armed **or** ring_windows), otherwise a long file is cut by idle sleep.
+- The form remembers the last mode (`settings.last_mode`); the give-up timeout row is hidden in `play` mode and replaced by a one-line explanation.

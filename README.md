@@ -21,6 +21,7 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 |---|---|
 | 🎵 **Any sound** | MP3, WAV, OGG, FLAC — pick a file, or **record from the microphone** and use the recording as the alarm. Quiet mics are **auto-boosted** to a healthy level, and the app warns while recording if the chosen mic is picking up nothing |
 | 📅 **Real scheduling** | Date + time (24 h), repeat **once / every day / weekdays**, unlimited alarms |
+| ▶ **Long recordings** | Each alarm either **rings until you stop it** (looping, with a give-up timeout) or **plays the whole file once** — a two-hour talk or a full album starts on time, keeps the computer awake while it plays, and stops by itself at the end |
 | 🔊 **Volume you control** | Per-alarm volume, **fade-in** over N seconds, optional "force the system volume up" when ringing |
 | 🔈 **Output per alarm** | Each alarm picks its **own output device** — bedroom speakers for the wake-up, headset for the meeting reminder. Falls back to the system default (and says so) if the device is unplugged |
 | 📡 **AirPlay (macOS)** | Alarms can play on **HomePod, Apple TV or any AirPlay speaker** — the same devices you pick in the Mac's Sound menu. Routed through the Music app; if the speaker is offline the alarm still rings on the Mac |
@@ -64,13 +65,15 @@ The window has two halves. **Left:** your alarms (with the next ring time) and, 
 
 | Step | What you do |
 |---|---|
-| ① **When** | Pick the time with the big hour / minute fields, choose *Just once*, *Every day* or *Weekdays*. The date only appears for one-time alarms. *In 1 min* / *In 10 min* are there to try a sound for real. |
+| ① **When** | Pick the time with the big hour / minute fields, choose *Just once*, *Every day* or *Weekdays*. The date only appears for one-time alarms. *In 1 min* / *In 10 min* are there to try a sound for real. Then say what should happen at that time: *Ring until I stop it* (the usual alarm) or *Play the whole file once* for long recordings, talks or albums. |
 | ② **Sound** | *Choose a file…* or *🎤 Record my voice* (the level meter shows you're being heard). *▶ Preview* plays it at the slider volume. |
 | ③ **Where** | Which speaker should ring: built-in, headset, HDMI, or on a Mac any AirPlay speaker such as a HomePod. |
 
 Press **Save alarm**. The header shows a big clock, the next alarm with a countdown, and three plain-language status pills: *alarm set*, *computer will stay awake*, *will wake from sleep at …*.
 
 **When it rings**, a dark full-window alert pops on top with the time, the alarm name, a big red **STOP** and a **Snooze** button (Enter or Esc also stop it); the main window shows a red STOP bar as well, and the volume fades in.
+
+**When a whole-file alarm plays**, the window is a calmer *Now playing* card that stays out of your way (not pinned on top), shows how long it has been playing, and closes itself when the file ends. The computer is kept awake for the whole duration.
 
 ## How sleep & wake work
 

@@ -58,6 +58,13 @@ def test_normalize():
     assert ac.normalize_int16(array("h"))[1] == 0.0
 
 
+def test_play_mode():
+    # default is the classic alarm; the last saved mode is remembered for the next new alarm
+    assert ac.new_alarm()["mode"] == "alarm"
+    assert ac.new_alarm(dict(ac.DEFAULT_SETTINGS, last_mode="play"))["mode"] == "play"
+    assert ac.new_alarm(dict(ac.DEFAULT_SETTINGS, last_mode="alarm"))["mode"] == "alarm"
+
+
 def test_scheduler():
     tmp = tempfile.mkdtemp()
     store = ac.AlarmStore(os.path.join(tmp, "alarms.json"))
@@ -78,4 +85,4 @@ def test_scheduler():
 
 
 if __name__ == "__main__":
-    test_next_fire(); test_alarm_output_roundtrip(); test_normalize(); test_scheduler(); print("OK")
+    test_next_fire(); test_alarm_output_roundtrip(); test_normalize(); test_play_mode(); test_scheduler(); print("OK")
