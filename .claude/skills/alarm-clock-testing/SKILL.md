@@ -10,7 +10,7 @@ description: How to verify the alarm clock end-to-end – headless logic test fo
 python3 -m py_compile alarm_clock.py
 .venv/bin/python tests/test_logic.py
 ```
-`tests/test_logic.py` covers `next_fire` for once/daily/weekdays, the GRACE catch-up, `Scheduler.tick` firing/missed/snooze. Add a case there whenever you touch scheduling.
+`tests/test_schedules.py` covers schedules (days, skip/undo, lateness, DST gap, migration, duplicate, queue). `tests/test_logic.py` covers `next_fire` for once/daily/weekdays, the GRACE catch-up, `Scheduler.tick` firing/missed/snooze. Add a case there whenever you touch scheduling.
 
 ## 2. GUI smoke test (before any "done")
 1. `bash "Start Alarm Clock.command"` (macOS) – window must appear with no traceback in the terminal.

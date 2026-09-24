@@ -17,6 +17,7 @@ Notes
 """
 from __future__ import annotations
 
+import faulthandler
 import json
 import math
 import os
@@ -61,10 +62,11 @@ def chime(path: str, seconds: float = 4.0) -> str:
     return path
 
 
-def write_data(alarms: list[dict], **settings) -> None:
+def write_data(alarms: list[dict], schedules: list[dict] | None = None, occurrences: dict | None = None, **settings) -> None:
     s = dict(ac.DEFAULT_SETTINGS, **settings)
     with open(ac.DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump({"alarms": alarms, "settings": s}, f)
+        json.dump({"version": ac.DATA_VERSION, "alarms": alarms, "settings": s, "schedules": schedules or [],
+                   "exceptions": {}, "occurrences": occurrences or {}}, f)
 
 
 def sample_alarms() -> list[dict]:
@@ -84,6 +86,34 @@ def sample_alarms() -> list[dict]:
         dict(id="a4", label="Evening talk", date=today, time="19:30", repeat="daily", sound=talk, output="",
              volume=70, ring_minutes=10, mode="play", enabled=True, last_fired=None),
     ]
+
+
+def sample_schedules() -> tuple[list[dict], dict]:
+    """The example family from the manual: son, daughter and the whole family in the evening."""
+    rec = ac.REC_DIR
+    os.makedirs(rec, exist_ok=True)
+
+    def voice(name):
+        return ac.portable_sound(chime(os.path.join(rec, name)))
+
+    def ev(t, label, sound="", enabled=True):
+        e = ac.new_event(t); e.update(label=label, sound=sound, enabled=enabled); return e
+    son = ac.new_schedule(); son.update(name="Son — School day", days=list(ac.WEEKDAYS), output="Son's bedroom speaker", volume=75, enabled=True)
+    son["events"] = [ev("07:00", "Wake up", voice("voice_wake-up.wav")), ev("07:20", "Breakfast", voice("voice_breakfast-is-ready.wav")),
+                     ev("07:50", "Leave for school", os.path.join(SOUNDS, "Morning chimes.wav")), ev("17:00", "Homework")]
+    dau = ac.new_schedule(); dau.update(name="Daughter — School day", days=list(ac.WEEKDAYS), output="Daughter's bedroom speaker", volume=70, enabled=True)
+    dau["events"] = [ev("07:10", "Wake up", voice("voice_good-morning.wav")), ev("07:30", "Breakfast", voice("voice_breakfast-is-ready.wav")),
+                     ev("08:00", "Leave for school", voice("voice_time-to-go.wav"))]
+    fam = ac.new_schedule(); fam.update(name="Family — Evening", days=list(ac.EVERY_DAY), output="Living room speaker", volume=60, enabled=True)
+    fam["events"] = [ev("18:30", "Dinner", voice("voice_dinner.wav")), ev("20:00", "Prepare for tomorrow", voice("voice_prepare.wav")),
+                     ev("20:30", "Wind down", voice("voice_wind-down.wav"))]
+    today = date.today()
+    occ = {}
+    for sc in (son, dau):
+        for e in sc["events"][:3]:
+            occ[ac.occurrence_key(sc["id"], e["id"], today)] = {"status": "played", "at": f"{today}T{e['time']}:02", "note": ""}
+    occ[ac.occurrence_key(dau["id"], dau["events"][2]["id"], today)] = {"status": "skipped", "at": f"{today}T08:00:00", "note": "skipped for today"}
+    return [son, dau, fam], occ
 
 
 # ----- capture helpers
@@ -140,6 +170,7 @@ def main() -> None:
 
     header = app.l_next.master.master                # dark header bar
     editor_card = app.l_editor_title.master.master.master
+    sched_card = app.sched_editor.master
     when_frame = app.time_row.master
     sound_frame = app.l_rec.master
     steps: list = []
@@ -151,23 +182,57 @@ def main() -> None:
         if not steps:
             return finish()
         ms, fn = steps.pop(0)
-        app.after(ms, lambda: (fn(), run_next()))
+
+        def go():
+            try:
+                fn()
+            except Exception as e:           # keep going so one bad shot does not hang the run
+                import traceback; traceback.print_exc()
+                print("  step failed:", e)
+            run_next()
+        app.after(ms, go)
 
     # 1. first launch – empty list, default new alarm, neutral status pills
     later(1500, lambda: capture(app, "first-launch.png"))
 
-    # 2. the sample alarms appear; edit "Wake up"
+    # 2. the sample family appears: Today, then Schedules with the son's schedule open
     def load_samples():
-        write_data(sample_alarms(), last_sound=os.path.join(SOUNDS, "Morning chimes.wav"), last_volume=80)
+        scheds, occ = sample_schedules()
+        write_data(sample_alarms(), scheds, occ, last_sound=os.path.join(SOUNDS, "Morning chimes.wav"), last_volume=80)
         app.store.load()
         app._refresh_list()
+        app._refresh_schedules()
+        app._today_expanded = True
+        app._show_page("today")
         app._apply_power()
-        app.tree.selection_set("a1")
     later(200, load_samples)
-    later(2500, lambda: capture(app, "main.png"))
+    later(2500, lambda: capture(app, "today.png"))
+    def open_son():
+        app._show_page("schedules")
+        sid = app.store.schedules[0]["id"]
+        app.stree.selection_set(sid)
+    later(200, open_son)
+    later(1200, lambda: capture(app, "schedules.png"))
+    def open_breakfast():
+        eid = app.sdraft["events"][1]["id"]
+        app.etree.selection_set(eid)
+        app._event_edit()
+    later(200, open_breakfast)
+    later(800, lambda: capture_widget(sched_card, "event-editor.png"))
+    later(200, app._ev_record_start)
+    later(2600, lambda: capture_widget(app.ev_box, "event-recording.png", pad=10))
+    later(100, app._ev_record_stop)
+    later(700, lambda: capture_widget(app.ev_box, "event-take.png", pad=10))
+    later(100, lambda: (app._ev_take_discard(silent=True), app._event_cancel()))
+    # 3. the classic alarm editor (Alarms view); edit "Wake up"
+    def open_alarms():
+        app._show_page("alarms")
+        app.tree.selection_set("a1")
+    later(200, open_alarms)
+    later(1500, lambda: capture(app, "main.png"))
     later(100, lambda: capture_widget(header, "header.png"))
 
-    # 3. the editor with a one-time alarm (date row visible), and the whole-file mode
+    # 4. the editor with a one-time alarm (date row visible), and the whole-file mode
     later(100, lambda: app.tree.selection_set("a3"))
     later(600, lambda: capture_widget(editor_card, "editor.png"))
     later(100, lambda: app.tree.selection_set("a4"))
@@ -267,6 +332,7 @@ def main() -> None:
         app.destroy()
 
     print("writing to", OUT)
+    faulthandler.dump_traceback_later(150, exit=True)
     app.after(1200, run_next)
     app.mainloop()
     shutil.rmtree(TMP, ignore_errors=True)

@@ -28,3 +28,10 @@ Two separate jobs, both in `PowerManager` in `alarm_clock.py`:
 - Always check `alarmclock.log` – every power action logs its result.
 
 Related: [[alarm-ux]] for how state is shown, [[plain-language-errors]] for the wording when a prompt is declined.
+
+## Routine messages (schedules) – since 2026-09-24
+- `Scheduler._tick_schedules` dispatches `("announce", occ, due)` once per (schedule, event, date): the occurrence is recorded in `AlarmStore.occurrences` **before** the event is queued, so restarts, sleep and repeated ticks never replay it.
+- Lateness limit `SCHEDULE_GRACE` = 2 min (alarms keep `GRACE` = 30 min). Anything older is recorded `missed` with a note ("the computer was off or asleep", "waited too long behind other sounds") – no burst of stale family reminders after a wake.
+- DST: a wall-clock time that does not exist (`local_time_exists` false) is recorded `missed` ("clocks went forward"); a repeated hour cannot fire twice because the key is per date.
+- Keep-awake and the OS wake use `AlarmStore.next_event()` = min(next alarm, next audible schedule event). Events without sound, disabled events/schedules and skipped occurrences are excluded, so they never arm a wake.
+- The GUI's `AnnouncementQueue` serialises messages on the single pygame stream; alarms always take the stream (`_take_local_stream` marks a playing message `interrupted`, never replays it).

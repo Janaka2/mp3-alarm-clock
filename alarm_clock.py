@@ -16,6 +16,7 @@ Runs on macOS, Windows and Linux.  Requires: pygame, sounddevice (see requiremen
 from __future__ import annotations
 
 import atexit
+import shutil
 import webbrowser
 import ctypes
 import json
@@ -48,6 +49,9 @@ IS_LINUX = sys.platform.startswith("linux")
 GRACE = timedelta(minutes=30)          # fire an alarm that is overdue by at most this much (e.g. after sleep)
 WAKE_LEAD_SECONDS = 60                 # wake the machine this many seconds before the alarm
 SUPPORTED_AUDIO = (".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aiff", ".aif")
+DATA_VERSION = 2                       # alarms.json schema version (1 = alarms only, 2 = + schedules)
+SCHEDULE_GRACE = timedelta(minutes=2)  # a routine message older than this is shown as missed, never played late
+OCCURRENCE_KEEP_DAYS = 7               # how long played/missed history of routine messages is kept
 
 
 # --------------------------------------------------------------------------- paths
@@ -152,13 +156,17 @@ def next_fire(a: dict, now: datetime | None = None) -> datetime | None:
 
 
 class AlarmStore:
-    """Thread-safe list of alarms + settings persisted to alarms.json."""
+    """Thread-safe alarms + schedules + settings persisted to alarms.json (schema DATA_VERSION)."""
 
     def __init__(self, path: str):
         self.path = path
         self.lock = threading.RLock()
         self.alarms: list[dict] = []
+        self.schedules: list[dict] = []
+        self.exceptions: dict[str, dict] = {}     # "YYYY-MM-DD" → {"schedules": [ids], "events": [ids]}  (skip today)
+        self.occurrences: dict[str, dict] = {}    # "sid:eid:YYYY-MM-DD" → {"status", "at", "note"}
         self.settings: dict = dict(DEFAULT_SETTINGS)
+        self.load_problem = ""                    # plain-language text when the file could not be read
         self.load()
 
     def load(self) -> None:
@@ -167,18 +175,56 @@ class AlarmStore:
         try:
             with open(self.path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            self.alarms = data.get("alarms", [])
-            self.settings.update(data.get("settings", {}))
+            if not isinstance(data, dict):
+                raise ValueError("not a JSON object")
         except (OSError, ValueError) as e:
             log(f"Could not read {self.path}: {e}")
+            kept = f"{self.path}.broken-{datetime.now():%Y%m%d-%H%M%S}"
+            try:
+                shutil.copyfile(self.path, kept)
+            except OSError:
+                kept = self.path
+            self.load_problem = (f"The alarms file could not be read, so the app starts empty.\n\n"
+                                 f"The original file was kept as\n{kept}\n"
+                                 "If you need the old alarms back, quit, fix or rename that file to alarms.json, and start again.\n\n"
+                                 f"Details: {e}")
+            return
+        version = int(data.get("version", 1) or 1)
+        if version < DATA_VERSION:
+            backup = f"{self.path}.backup-v{version}"
+            if not os.path.exists(backup):
+                try:
+                    shutil.copyfile(self.path, backup)
+                    log(f"upgrading alarms.json from version {version} to {DATA_VERSION}; backup kept at {backup}")
+                except OSError as e:
+                    log(f"could not back up alarms.json before upgrade: {e}")
+        self.alarms = data.get("alarms", [])
+        self.settings.update(data.get("settings", {}))
+        self.schedules = [self._fix_schedule(x) for x in data.get("schedules", [])]
+        self.exceptions = data.get("exceptions", {}) or {}
+        self.occurrences = data.get("occurrences", {}) or {}
+        for occ in self.occurrences.values():
+            if occ.get("status") in ("queued", "playing"):
+                occ.update(status="missed", note="the app was closed before it finished")
+        self.prune(date.today())
+
+    @staticmethod
+    def _fix_schedule(x: dict) -> dict:
+        s = dict(new_schedule(), **x)
+        s["days"] = sorted({int(d) for d in s.get("days", []) if 0 <= int(d) <= 6})
+        s["events"] = [dict(new_event(), **e) for e in s.get("events", [])]
+        return s
 
     def save(self) -> None:
         with self.lock:
+            data = {"version": DATA_VERSION, "alarms": self.alarms, "settings": self.settings,
+                    "schedules": self.schedules, "exceptions": self.exceptions, "occurrences": self.occurrences}
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"alarms": self.alarms, "settings": self.settings}, f, indent=2)
+                json.dump(data, f, indent=2)
             os.replace(tmp, self.path)
 
+    # ----- alarms
     def upsert(self, alarm: dict) -> None:
         with self.lock:
             for i, a in enumerate(self.alarms):
@@ -198,11 +244,254 @@ class AlarmStore:
         with self.lock:
             return next((a for a in self.alarms if a["id"] == alarm_id), None)
 
-    def next_event(self, now: datetime | None = None) -> tuple[datetime, dict] | None:
+    def next_alarm(self, now: datetime | None = None) -> tuple[datetime, dict] | None:
         now = now or datetime.now()
         with self.lock:
             events = [(nf, a) for a in self.alarms if (nf := next_fire(a, now))]
         return min(events, key=lambda e: e[0]) if events else None
+
+    # ----- schedules
+    def get_schedule(self, sid: str) -> dict | None:
+        with self.lock:
+            return next((x for x in self.schedules if x["id"] == sid), None)
+
+    def upsert_schedule(self, sched: dict) -> None:
+        with self.lock:
+            for i, x in enumerate(self.schedules):
+                if x["id"] == sched["id"]:
+                    self.schedules[i] = sched
+                    break
+            else:
+                self.schedules.append(sched)
+            self.save()
+
+    def delete_schedule(self, sid: str) -> None:
+        """Removes the schedule and its events only.  Audio files are never deleted here."""
+        with self.lock:
+            self.schedules = [x for x in self.schedules if x["id"] != sid]
+            for day in self.exceptions.values():
+                day["schedules"] = [x for x in day.get("schedules", []) if x != sid]
+            self.save()
+
+    def sound_users(self, path: str) -> int:
+        """How many alarms/events refer to this audio file (used before deleting a recording)."""
+        target = os.path.normcase(os.path.abspath(resolve_sound(path)))
+        n = 0
+        with self.lock:
+            for a in self.alarms:
+                if a.get("sound") and os.path.normcase(os.path.abspath(resolve_sound(a["sound"]))) == target:
+                    n += 1
+            for x in self.schedules:
+                for e in x["events"]:
+                    if e.get("sound") and os.path.normcase(os.path.abspath(resolve_sound(e["sound"]))) == target:
+                        n += 1
+        return n
+
+    # ----- skip today (date exceptions)
+    def is_skipped(self, day: date, sid: str, eid: str | None = None) -> bool:
+        ex = self.exceptions.get(day.isoformat(), {})
+        if sid in ex.get("schedules", []):
+            return True
+        return eid is not None and eid in ex.get("events", [])
+
+    def set_skip(self, day: date, sid: str | None, eid: str | None, on: bool) -> None:
+        """Skip (or un-skip) a whole schedule (eid None) or one event for one date."""
+        with self.lock:
+            ex = self.exceptions.setdefault(day.isoformat(), {"schedules": [], "events": []})
+            kind, ident = ("events", eid) if eid else ("schedules", sid)
+            lst = ex.setdefault(kind, [])
+            if on and ident not in lst:
+                lst.append(ident)
+            if not on and ident in lst:
+                lst.remove(ident)
+            if not ex["schedules"] and not ex["events"]:
+                self.exceptions.pop(day.isoformat(), None)
+            self.save()
+
+    # ----- occurrence history (prevents replay after restart / sleep / repeated ticks)
+    def record(self, key: str, status: str, note: str = "") -> None:
+        with self.lock:
+            self.occurrences[key] = {"status": status, "at": datetime.now().isoformat(timespec="seconds"), "note": note}
+            try:
+                self.save()
+            except OSError as e:          # keep going: the in-memory record still prevents a replay in this run
+                log(f"could not save alarms.json after recording {key} as {status}: {e}")
+
+    def prune(self, today: date) -> None:
+        """Drop exceptions for past days and old occurrence history.  Today's skip expires by itself."""
+        with self.lock:
+            self.exceptions = {d: v for d, v in self.exceptions.items() if d >= (today - timedelta(days=1)).isoformat()}
+            cutoff = (today - timedelta(days=OCCURRENCE_KEEP_DAYS)).isoformat()
+            self.occurrences = {k: v for k, v in self.occurrences.items() if k.rsplit(":", 1)[-1] >= cutoff}
+
+    def event_due(self, sched: dict, ev: dict, day: date) -> datetime | None:
+        """When this event would play on `day`, or None if it is not eligible that day
+        (schedule off, day not selected, event off, no sound, skipped, or already handled)."""
+        if not sched["enabled"] or day.weekday() not in sched["days"] or not ev["enabled"] or not ev.get("sound"):
+            return None
+        if self.is_skipped(day, sched["id"], ev["id"]) or occurrence_key(sched["id"], ev["id"], day) in self.occurrences:
+            return None
+        try:
+            return datetime.combine(day, alarm_time(ev))
+        except ValueError:
+            return None
+
+    def next_announcement(self, now: datetime | None = None) -> tuple[datetime, dict] | None:
+        """The next routine message that will actually play (audible, enabled, not skipped, not yet handled)."""
+        now = now or datetime.now()
+        best: tuple[datetime, dict] | None = None
+        with self.lock:
+            first = (now - SCHEDULE_GRACE).date()          # a 23:59 message is still valid at 00:01
+            for day_offset in range(0, 9):
+                day = first + timedelta(days=day_offset)
+                for sched in self.schedules:
+                    for ev in sched["events"]:
+                        due = self.event_due(sched, ev, day)
+                        if due is None or due < now - SCHEDULE_GRACE or not local_time_exists(due):
+                            continue
+                        if best is None or due < best[0]:
+                            best = (due, {"id": "event:" + occurrence_key(sched["id"], ev["id"], day), "kind": "event",
+                                          "label": f"{ev['label']} · {sched['name']}", "output": sched.get("output", ""),
+                                          "schedule": sched, "event": ev})
+                if best:
+                    return best
+        return None
+
+    def next_event(self, now: datetime | None = None) -> tuple[datetime, dict] | None:
+        """Next audible thing of any kind: an individual alarm or a routine message."""
+        now = now or datetime.now()
+        cands = [c for c in (self.next_alarm(now), self.next_announcement(now)) if c]
+        return min(cands, key=lambda c: c[0]) if cands else None
+
+
+# --------------------------------------------------------------------------- schedules (family routines)
+DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+WEEKDAYS, WEEKEND, EVERY_DAY = [0, 1, 2, 3, 4], [5, 6], [0, 1, 2, 3, 4, 5, 6]
+
+
+def new_schedule(settings: dict | None = None) -> dict:
+    """A schedule is a named group of timed events sharing repeat days, one speaker and one volume."""
+    s = settings or DEFAULT_SETTINGS
+    return {"id": uuid.uuid4().hex, "name": "", "days": list(WEEKDAYS), "output": s.get("last_output", ""),
+            "volume": int(s.get("last_volume", 80)), "enabled": False, "events": []}
+
+
+def new_event(time_str: str = "07:00") -> dict:
+    return {"id": uuid.uuid4().hex, "time": time_str, "label": "", "sound": "", "enabled": True}
+
+
+def days_label(days) -> str:
+    d = sorted(set(int(x) for x in days))
+    if d == EVERY_DAY:
+        return "Every day"
+    if d == WEEKDAYS:
+        return "Weekdays"
+    if d == WEEKEND:
+        return "Weekends"
+    if not d:
+        return "No days"
+    return " ".join(DAY_NAMES[i] for i in d)
+
+
+def portable_sound(path: str) -> str:
+    """Store app-owned recordings relative to the app folder so the whole folder can be moved."""
+    if path and os.path.isabs(path):
+        try:
+            rel = os.path.relpath(path, BASE_DIR)
+            if not rel.startswith(".."):
+                return rel.replace(os.sep, "/")
+        except ValueError:
+            pass
+    return path
+
+
+def resolve_sound(path: str) -> str:
+    if not path:
+        return ""
+    return path if os.path.isabs(path) else os.path.join(BASE_DIR, *path.split("/"))
+
+
+def local_time_exists(dt: datetime) -> bool:
+    """False for a wall-clock time that is skipped when the clocks go forward (a DST gap)."""
+    try:
+        back = datetime.fromtimestamp(time.mktime(dt.timetuple()))
+        return back.replace(microsecond=0) == dt.replace(microsecond=0)
+    except (OverflowError, ValueError, OSError):
+        return True
+
+
+def occurrence_key(sid: str, eid: str, day: date) -> str:
+    return f"{sid}:{eid}:{day.isoformat()}"
+
+
+def validate_schedule(sched: dict) -> dict[str, str]:
+    """Field name → plain-language problem.  An empty dict means the schedule can be saved."""
+    errs: dict[str, str] = {}
+    if not sched.get("name", "").strip():
+        errs["name"] = "Give the schedule a name, for example “Son — School day”."
+    if not sched.get("days"):
+        errs["days"] = "Choose at least one day."
+    for e in sched.get("events", []):
+        try:
+            h, m = (int(x) for x in e["time"].split(":"))
+            if not (0 <= h < 24 and 0 <= m < 60):
+                raise ValueError
+        except (ValueError, AttributeError):
+            errs[f"event:{e['id']}"] = "The time needs hours 0–23 and minutes 0–59."
+        if not e.get("label", "").strip():
+            errs.setdefault(f"event:{e['id']}", "Give the event a name, for example “Breakfast”.")
+    return errs
+
+
+def duplicate_schedule(sched: dict) -> dict:
+    """A deep copy with fresh IDs, switched off, sharing the same audio files."""
+    d = json.loads(json.dumps(sched))
+    d["id"] = uuid.uuid4().hex
+    d["name"] = f"{sched['name']} (copy)".strip()
+    d["enabled"] = False
+    for e in d["events"]:
+        e["id"] = uuid.uuid4().hex
+    return d
+
+
+class AnnouncementQueue:
+    """Routine messages waiting for the single audio stream, in due-time order.
+    The GUI pops one at a time; anything that waited longer than SCHEDULE_GRACE is marked missed, not played."""
+
+    def __init__(self):
+        self.pending: list[dict] = []          # {"key", "schedule", "event", "due"}
+
+    def push(self, occ: dict) -> None:
+        if any(x["key"] == occ["key"] for x in self.pending):
+            return
+        self.pending.append(occ)
+        self.pending.sort(key=lambda x: (x["due"], x["schedule"]["name"], x["event"]["time"], x["key"]))
+
+    def cancel(self, sid: str | None = None, eid: str | None = None) -> list[dict]:
+        """Drop queued messages of one schedule (or one event); returns what was dropped."""
+        gone = [x for x in self.pending if (sid is None or x["schedule"]["id"] == sid) and (eid is None or x["event"]["id"] == eid)]
+        self.pending = [x for x in self.pending if x not in gone]
+        return gone
+
+    def pop_playable(self, now: datetime, store: AlarmStore) -> dict | None:
+        """Next message that may still play; late or broken ones are recorded and skipped over."""
+        while self.pending:
+            occ = self.pending.pop(0)
+            if now - occ["due"] > SCHEDULE_GRACE:
+                store.record(occ["key"], "missed", "waited too long behind other sounds")
+                log(f"routine message '{occ['event']['label']}' missed: {now - occ['due']} late")
+                continue
+            path = resolve_sound(occ["event"].get("sound", ""))
+            if not path or not os.path.isfile(path):
+                store.record(occ["key"], "failed", "sound file is missing")
+                log(f"routine message '{occ['event']['label']}' failed: sound file missing ({path})")
+                continue
+            occ["path"] = path
+            return occ
+        return None
+
+    def __len__(self) -> int:
+        return len(self.pending)
 
 
 # --------------------------------------------------------------------------- audio playback
@@ -243,7 +532,12 @@ class Player:
             return ""
         except Exception as e:
             log(f"output device '{wanted}' unavailable ({e}); falling back to system default")
-            pygame.mixer.init()
+            try:
+                pygame.mixer.init()
+            except Exception as e2:
+                self.ok, self.error = False, str(e2)
+                log(f"audio output lost: {e2}")
+                raise RuntimeError("No sound output is available right now – plug in speakers or headphones.") from e2
             self.device = None
             return f"Output “{device}” is not available right now, so it is playing on the system default output."
 
@@ -258,13 +552,19 @@ class Player:
         pygame.mixer.music.play(-1 if loop else 0)
         return warning
 
+    def _live(self) -> bool:
+        if not self.ok:
+            return False
+        import pygame
+        return bool(pygame.mixer.get_init())
+
     def set_volume(self, volume: int) -> None:
-        if self.ok:
+        if self._live():
             import pygame
             pygame.mixer.music.set_volume(max(0, min(100, volume)) / 100.0)
 
     def stop(self) -> None:
-        if self.ok:
+        if self._live():
             import pygame
             pygame.mixer.music.stop()
             try:
@@ -273,7 +573,7 @@ class Player:
                 pass
 
     def is_playing(self) -> bool:
-        if not self.ok:
+        if not self._live():
             return False
         import pygame
         return bool(pygame.mixer.music.get_busy())
@@ -603,6 +903,8 @@ class PowerManager:
         self._win_timer = None
         self._win_thread: threading.Thread | None = None
         self._win_stop = threading.Event()
+        self.stale_wake: datetime | None = None    # a wake a previous launch registered (macOS); cancelled with the next change
+        self.on_registered = None                   # callback(datetime | None) so the app can remember the registered wake
         atexit.register(self.shutdown)
 
     @property
@@ -655,6 +957,9 @@ class PowerManager:
                 target = None  # too close – the machine is awake right now anyway
         if target == self._wake_target:
             return
+        if target is None and self._wake_target and self._wake_target <= datetime.now():
+            self._wake_target, self.wake_state = None, "none"   # it already fired: nothing to cancel, no prompt
+            return
         if target is not None and target == self._declined_target:
             return  # the user declined the password prompt for this exact time; don't nag every second
         if not (IS_MAC or IS_WIN or IS_LINUX):
@@ -685,10 +990,14 @@ class PowerManager:
         if new is None:
             self.wake_state, self.wake_detail = "none", ""
             log("system wake cleared" + (f" ({detail})" if detail else ""))
+            if self.on_registered:
+                self.on_registered(None)
             return
         if ok:
             self.wake_state, self.wake_detail = "registered", ""
             log(f"system wake registered for {new}")
+            if self.on_registered:
+                self.on_registered(new)
         else:
             self.wake_state = "declined" if declined else "failed"
             self.wake_detail = detail
@@ -699,6 +1008,9 @@ class PowerManager:
     def _mac_wake(self, old, new) -> None:
         fmt = "%m/%d/%y %H:%M:%S"
         parts = []
+        stale, self.stale_wake = self.stale_wake, None
+        if stale and stale != old and stale > datetime.now():
+            parts.append(f'pmset schedule cancel wake \\"{stale.strftime(fmt)}\\"')
         if old:
             parts.append(f'pmset schedule cancel wake \\"{old.strftime(fmt)}\\"')
         if new:
@@ -781,6 +1093,7 @@ class Scheduler(threading.Thread):
         self.events = events
         self.snoozes: list[tuple[datetime, dict]] = []
         self.ringing: set[str] = set()
+        self._last_prune: date | None = None
         self._stop = threading.Event()
 
     def run(self) -> None:
@@ -812,12 +1125,54 @@ class Scheduler(threading.Thread):
                 self.ringing.add(a["id"])
                 log(f"alarm due: '{a['label']}' at {nf} (now {now:%H:%M:%S})")
                 self.events.put(("ring", a, nf))
+            self._tick_schedules(now)
         due = [s for s in self.snoozes if s[0] <= now]
         for s in due:
             self.snoozes.remove(s)
             self.ringing.add(s[1]["id"])
             log(f"snoozed alarm due: '{s[1]['label']}'")
             self.events.put(("ring", s[1], s[0]))
+
+    def _tick_schedules(self, now: datetime) -> None:
+        """Routine messages: each (schedule, event, date) plays at most once; late ones become 'missed'."""
+        today = now.date()
+        if self._last_prune != today:
+            self._last_prune = today
+            self.store.prune(today)
+        days = sorted({(now - SCHEDULE_GRACE).date(), today})    # just after midnight, yesterday's 23:59 still counts
+        for day in days:
+            for sched in self.store.schedules:
+                if not sched["enabled"] or day.weekday() not in sched["days"]:
+                    continue
+                for ev in sched["events"]:
+                    if not ev["enabled"] or not ev.get("sound"):
+                        continue
+                    key = occurrence_key(sched["id"], ev["id"], day)
+                    if key in self.store.occurrences:
+                        continue
+                    try:
+                        due = datetime.combine(day, alarm_time(ev))
+                    except ValueError:
+                        continue
+                    if due > now:
+                        continue
+                    if self.store.is_skipped(day, sched["id"], ev["id"]):
+                        self.store.record(key, "skipped", "skipped for today")
+                        self.events.put(("occurrence", key, "skipped"))
+                        continue
+                    if not local_time_exists(due):
+                        self.store.record(key, "missed", "this time did not exist today (clocks went forward)")
+                        log(f"routine message '{ev['label']}' ({sched['name']}) missed: {ev['time']} did not exist today")
+                        self.events.put(("occurrence", key, "missed"))
+                        continue
+                    if now - due > SCHEDULE_GRACE:
+                        self.store.record(key, "missed", "the computer or the app was not running")
+                        log(f"routine message '{ev['label']}' ({sched['name']}) missed: due {due:%H:%M}, now {now:%H:%M:%S}")
+                        self.events.put(("occurrence", key, "missed"))
+                        continue
+                    self.store.record(key, "queued")
+                    log(f"routine message due: '{ev['label']}' ({sched['name']}) at {due:%H:%M}")
+                    self.events.put(("announce", {"key": key, "schedule": sched, "event": ev, "due": due}, due))
 
     def snooze(self, alarm: dict, minutes: int) -> datetime:
         when = datetime.now() + timedelta(minutes=minutes)
@@ -850,6 +1205,17 @@ def fmt_delta(td: timedelta) -> str:
     return f"{s}s"
 
 
+class NoteLabel(ttk.Label):
+    """A grid-managed label that takes no space while it has nothing to say."""
+
+    def configure(self, cnf=None, **kw):
+        r = super().configure(cnf, **kw)
+        if "text" in kw:
+            (self.grid if kw["text"] else self.grid_remove)()
+        return r
+    config = configure
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -863,6 +1229,13 @@ class App(tk.Tk):
         self._prewarmed: str | None = None
         self.recorder = Recorder()
         self.power = PowerManager()
+        remembered = self.store.settings.get("registered_wake") or ""
+        if IS_MAC and remembered:
+            try:
+                self.power.stale_wake = datetime.fromisoformat(remembered)
+            except ValueError:
+                pass
+        self.power.on_registered = self._remember_wake
         self.events: queue.Queue = queue.Queue()
         self.scheduler = Scheduler(self.store, self.events)
         self.editing_id: str | None = None
@@ -871,8 +1244,19 @@ class App(tk.Tk):
         self.once_play: dict[str, dict] = {}       # alarms in "play the whole file once" mode that are playing
         self._local_owner: str | None = None       # alarm currently playing on the pygame stream
         self._fade_job: str | None = None
+        self.announcements = AnnouncementQueue()
+        self.current_ann: dict | None = None      # routine message playing right now
+        self._ann_job: str | None = None
+        self.sdraft: dict | None = None           # schedule being edited (unsaved copy)
+        self.sdraft_saved = ""                    # JSON of its saved form, to notice unsaved changes
+        self.ev_draft: dict | None = None         # event being edited inside the schedule draft
+        self.ev_take = ""                         # a recording made for the event but not used yet
+        self._rec_owner = ""                      # "event" or "alarm": which editor started the current recording
+        self._today_expanded = False
+        self._saved_job: str | None = None
 
         self._build_ui()
+        self.bind("<Escape>", lambda e: self._stop_announcement())
         self._load_form(new_alarm(self.store.settings))
         self._refresh_list()
         self.scheduler.start()
@@ -881,6 +1265,11 @@ class App(tk.Tk):
         self.after(1000, self._tick_status)
         self._apply_power()
         self._tick_indicators()
+        self._refresh_schedules()
+        self._refresh_today()
+        self._show_page("today")
+        if self.store.load_problem:
+            self.after(200, lambda: messagebox.showerror(APP_NAME, self.store.load_problem))
         if not self.player.ok:
             messagebox.showerror(APP_NAME, "Sound output is not available, so alarms will be silent.\n\n"
                                  "Usually this means no speakers/headphones are connected, or the audio "
@@ -950,6 +1339,16 @@ class App(tk.Tk):
         st.configure("Horizontal.TScale", background=P["card"], troughcolor=P["line"], sliderlength=22, borderwidth=0)
         st.map("Horizontal.TScale", background=[("active", P["card"])])
         st.configure("Meter.Horizontal.TProgressbar", background=P["good"], troughcolor=P["line"], thickness=8, borderwidth=0)
+        for w in ("TButton", "Toolbutton", "TCheckbutton", "TRadiobutton", "TCombobox", "TEntry", "TSpinbox"):
+            st.configure(w, focuscolor=P["accent"])          # keyboard focus must be visible
+        st.configure("Nav.Toolbutton", background=P["bg"], foreground=P["muted"], padding=(16, 6), borderwidth=0, font=F["bold"])
+        st.map("Nav.Toolbutton", background=[("selected", P["card"]), ("active", P["soft_hover"])],
+               foreground=[("selected", P["accent"])])
+        st.configure("Rec.TLabel", background=P["card"], foreground=P["bad"], font=F["bold"])
+        st.configure("Good.TLabel", background=P["card"], foreground=P["good"], font=F["small_b"])
+        st.configure("Warn.TLabel", background=P["card"], foreground=P["warn"], font=F["small"])
+        st.configure("Bad.TLabel", background=P["card"], foreground=P["bad"], font=F["small"])
+        self.bind_class("TButton", "<Return>", lambda e: e.widget.invoke())
         self.configure(bg=P["bg"])
         self.option_add("*TCombobox*Listbox.font", F["base"])
         self.option_add("*TCombobox*Listbox.selectBackground", "#E3ECFF")
@@ -993,6 +1392,7 @@ class App(tk.Tk):
         self.l_awake = self._pill(pills); self.l_awake.pack(side="left", padx=(0, 8))
         self.l_wake = self._pill(pills); self.l_wake.pack(side="left", padx=(0, 8))
         self.b_retry_wake = ttk.Button(pills, text="Try again", style="Soft.TButton", command=self._retry_wake)
+        self.b_stop_hdr = ttk.Button(pills, text="■  Stop message", style="Danger.TButton", command=self._stop_announcement)
         right = tk.Frame(hdr, bg=P["header"])
         right.pack(side="right")
         self.l_clock = tk.Label(right, text="--:--", font=F["clock"], bg=P["header"], fg="white")
@@ -1015,11 +1415,23 @@ class App(tk.Tk):
         link.bind("<Leave>", lambda e: link.config(font=F["small"]))
         self.b_stop = ttk.Button(self, text="■   STOP ALARM", style="Stop.TButton", command=self._stop_all)
 
-        self.body = tk.Frame(self, bg=P["bg"], padx=22, pady=18)
+        # ---- navigation: Today and Schedules are the main views; Alarms keeps the classic editor
+        nav = tk.Frame(self, bg=P["bg"], padx=22)
+        nav.pack(fill="x", pady=(8, 0))
+        self.v_page = tk.StringVar(value="today")
+        for txt, val in (("Today", "today"), ("Schedules", "schedules"), ("Alarms", "alarms")):
+            ttk.Radiobutton(nav, text=txt, value=val, variable=self.v_page, style="Nav.Toolbutton",
+                            command=lambda v=val: self._show_page(v)).pack(side="left", padx=(0, 4))
+        ttk.Label(nav, text="Schedules play short messages for the family · Alarms are the classic wake-up alarms",
+                  foreground=P["muted"], background=P["bg"], font=F["small"]).pack(side="left", padx=16)
+
+        self.body = tk.Frame(self, bg=P["bg"], padx=22, pady=10)
         self.body.pack(fill="both", expand=True)
-        right = tk.Frame(self.body, bg=P["bg"])          # packed first so the editor keeps its natural width
+        self.pages: dict[str, tk.Frame] = {n: tk.Frame(self.body, bg=P["bg"]) for n in ("today", "schedules", "alarms")}
+        page = self.pages["alarms"]
+        right = tk.Frame(page, bg=P["bg"])          # packed first so the editor keeps its natural width
         right.pack(side="right", fill="y")
-        left = tk.Frame(self.body, bg=P["bg"])
+        left = tk.Frame(page, bg=P["bg"])
         left.pack(side="left", fill="both", expand=True, padx=(0, 14))
 
         # ---- left column, card 1: your alarms
@@ -1237,6 +1649,471 @@ class App(tk.Tk):
         for var in (self.v_sysvol_level, self.v_snooze, self.v_fade):
             var.trace_add("write", lambda *_: self._settings_changed())
 
+        self._build_today()
+        self._build_schedules()
+
+    def _show_page(self, name: str) -> None:
+        if name != "schedules" and self.sdraft and not self._sched_confirm_discard():
+            self.v_page.set("schedules")
+            return
+        self.v_page.set(name)
+        for n, f in self.pages.items():
+            if n == name:
+                f.pack(fill="both", expand=True)
+            else:
+                f.pack_forget()
+        if name == "today":
+            self._refresh_today()
+        elif name == "schedules":
+            self._refresh_schedules()
+
+    # ----- Today page
+    def _build_today(self) -> None:
+        P, F = self.PALETTE, self.F
+        card = self._card(self.pages["today"], fill="both", expand=True)
+        top = ttk.Frame(card, style="Card.TFrame")
+        top.pack(fill="x")
+        self.l_today_title = ttk.Label(top, text="Today", style="Title.TLabel")
+        self.l_today_title.pack(side="left")
+        self.b_stop_msg = ttk.Button(top, text="■  Stop message", style="Danger.TButton", command=self._stop_announcement)
+        ttk.Label(top, text="Show", style="Muted.TLabel").pack(side="left", padx=(28, 6))
+        self.v_today_filter = tk.StringVar(value="All schedules")
+        self.cb_today_filter = ttk.Combobox(top, textvariable=self.v_today_filter, state="readonly", width=28, font=F["small"])
+        self.cb_today_filter.pack(side="left")
+        self.cb_today_filter.bind("<<ComboboxSelected>>", lambda e: self._refresh_today())
+        self.l_today_next = ttk.Label(card, text="", style="Muted.TLabel")
+        self.l_today_next.pack(anchor="w", pady=(8, 0))
+        cols = ("time", "activity", "schedule", "sound", "output", "status")
+        self.ttree = ttk.Treeview(card, columns=cols, show="headings", height=3, selectmode="browse")
+        heads = {"time": ("Time", 70, False), "activity": ("Activity", 200, True), "schedule": ("Schedule", 190, True),
+                 "sound": ("Sound", 170, True), "output": ("Speaker", 150, True), "status": ("Status", 150, False)}
+        for c in cols:
+            self.ttree.heading(c, text=heads[c][0], anchor="w")
+            self.ttree.column(c, width=heads[c][1], anchor="w", stretch=heads[c][2])
+        self.ttree.tag_configure("earlier", foreground=P["muted"])
+        self.ttree.tag_configure("off", foreground=P["muted"])
+        self.ttree.tag_configure("playing", background=P["tint_ring"])
+        self.ttree.tag_configure("problem", foreground=P["bad"])
+        self.ttree.pack(fill="both", expand=True, pady=(12, 6))
+        self.ttree.bind("<<TreeviewSelect>>", lambda e: self._today_update_buttons())
+        self.ttree.bind("<Button-2>", self._today_menu)
+        self.ttree.bind("<Button-3>", self._today_menu)
+        self.ttree.bind("<Control-Button-1>", self._today_menu)
+        self.today_menu = tk.Menu(self, tearoff=0)
+        self.today_menu.add_command(label="Skip today", command=lambda: self._today_skip(True))
+        self.today_menu.add_command(label="Undo skip", command=lambda: self._today_skip(False))
+        self.today_menu.add_command(label="Preview sound", command=self._today_preview)
+        self.today_menu.add_command(label="Stop message", command=self._stop_announcement)
+        self.l_today_empty = ttk.Label(card, text="", style="Muted.TLabel", justify="left", wraplength=900)
+        self.b_today_create = ttk.Button(card, text="＋  Create your first schedule", style="Accent.TButton",
+                                         command=lambda: (self._show_page("schedules"), self._sched_new()))
+        acts = ttk.Frame(card, style="Card.TFrame")
+        acts.pack(fill="x")
+        self.b_today_earlier = ttk.Button(acts, text="▸  Earlier today", style="Soft.TButton", command=self._today_toggle_earlier)
+        self.b_today_earlier.pack(side="left")
+        self.b_today_skip = ttk.Button(acts, text="Skip today", style="Soft.TButton", command=lambda: self._today_skip(True))
+        self.b_today_skip.pack(side="right")
+        self.b_today_unskip = ttk.Button(acts, text="Undo skip", style="Soft.TButton", command=lambda: self._today_skip(False))
+        self.b_today_preview = ttk.Button(acts, text="▶  Preview sound", style="Soft.TButton", command=self._today_preview)
+        self.b_today_preview.pack(side="right", padx=8)
+        self.l_today_hint = ttk.Label(card, text="Select a row to preview its sound or skip it for today.  Playing a message only reminds – it never marks the activity as done.",
+                                      style="Muted.TLabel")
+        self.l_today_hint.pack(anchor="w", pady=(8, 0))
+
+    STATUS_TEXT = {"queued": "Playing soon", "playing": "Playing", "played": "Played", "missed": "Missed", "failed": "Failed",
+                   "skipped": "Skipped", "stopped": "Stopped", "interrupted": "Interrupted"}
+
+    def _today_rows(self) -> list[dict]:
+        """Everything that happens today, from all schedules plus the individual alarms, with a plain status."""
+        now = datetime.now()
+        today = now.date()
+        rows: list[dict] = []
+        for sc in self.store.schedules:
+            if not sc["enabled"] or today.weekday() not in sc["days"]:
+                continue
+            sched_skipped = self.store.is_skipped(today, sc["id"])
+            for ev in sc["events"]:
+                try:
+                    dt = datetime.combine(today, alarm_time(ev))
+                except ValueError:
+                    continue
+                key = occurrence_key(sc["id"], ev["id"], today)
+                occ = self.store.occurrences.get(key)
+                path = resolve_sound(ev.get("sound", ""))
+                if not path:
+                    sound = "No sound"
+                elif not os.path.isfile(path):
+                    sound = "Missing file"
+                elif path.startswith(REC_DIR):
+                    sound = "🎤 Recording"
+                else:
+                    sound = os.path.basename(path)
+                skipped = sched_skipped or self.store.is_skipped(today, sc["id"], ev["id"])
+                if occ:                                   # what really happened always wins
+                    status = self.STATUS_TEXT.get(occ["status"], occ["status"])
+                elif not ev["enabled"]:
+                    status = "Off"
+                elif skipped:
+                    status = "Skipped"
+                elif not path:
+                    status = "No sound"
+                elif not os.path.isfile(path):
+                    status = "Missing file"
+                elif dt < now - SCHEDULE_GRACE:
+                    status = "Missed"
+                else:
+                    status = "Upcoming"
+                rows.append(dict(iid=key, kind="event", dt=dt, time=ev["time"], label=ev["label"], sched=sc["name"], sid=sc["id"],
+                                 eid=ev["id"], sound=sound, output=output_label(sc.get("output", "")), status=status,
+                                 skipped=skipped, note=(occ or {}).get("note", ""), path=path, volume=sc["volume"],
+                                 out=sc.get("output", "")))
+        for a in self.store.alarms:
+            nf = next_fire(a, now)
+            last = datetime.fromisoformat(a["last_fired"]) if a.get("last_fired") else None
+            if a["id"] in self.ring_windows:
+                dt, status = (nf or last or now), ("Playing" if a["id"] in self.once_play else "Ringing")
+            elif nf and nf.date() == today:
+                dt, status = nf, "Upcoming"
+            elif last and last.date() == today:
+                dt, status = last, "Rang"
+            else:
+                continue
+            rows.append(dict(iid="alarm:" + a["id"], kind="alarm", dt=dt, time=f"{dt:%H:%M}", label=a["label"], sched="Alarm",
+                             sid=None, eid=a["id"], sound=os.path.basename(a["sound"]), output=output_label(a.get("output", "")),
+                             status=status, skipped=False, note="", path=a["sound"], volume=a["volume"], out=a.get("output", "")))
+        rows.sort(key=lambda r: (r["dt"], r["sched"], r["label"]))
+        return rows
+
+    def _refresh_today(self) -> None:
+        now = datetime.now()
+        self.l_today_title.config(text=f"Today · {now:%A, %d %B}")
+        names = ["All schedules"] + [sc["name"] for sc in self.store.schedules]
+        self.cb_today_filter["values"] = names
+        if self.v_today_filter.get() not in names:
+            self.v_today_filter.set("All schedules")
+        flt = self.v_today_filter.get()
+        rows = [r for r in self._today_rows() if flt == "All schedules" or r["sched"] == flt]
+        live = ("Upcoming", "Playing", "Playing soon", "Ringing")
+        upcoming = [r for r in rows if r["dt"] >= now or r["status"] in live]
+        earlier = [r for r in rows if r not in upcoming]
+        sel = self.ttree.selection()
+        self.ttree.delete(*self.ttree.get_children())
+        for r in upcoming + (earlier if self._today_expanded else []):
+            tag = ("playing" if r["status"] in ("Playing", "Ringing") else "problem" if r["status"] in ("Missed", "Failed", "Missing file")
+                   else "off" if r["status"] in ("Off", "Skipped", "No sound") else "earlier" if r in earlier else "")
+            self.ttree.insert("", "end", iid=r["iid"], tags=(tag,), values=(
+                r["time"], r["label"], r["sched"], r["sound"], r["output"], r["status"] + (f"  ({r['note']})" if r["note"] and r["status"] in ("Missed", "Failed") else "")))
+        if sel and self.ttree.exists(sel[0]):
+            self.ttree.selection_set(sel[0])
+        self.b_today_earlier.config(text=("▾" if self._today_expanded else "▸") + f"  Earlier today ({len(earlier)})",
+                                    state="normal" if earlier else "disabled")
+        # empty states
+        self.l_today_empty.pack_forget(); self.b_today_create.pack_forget()
+        if not self.store.schedules and not rows:
+            self.l_today_empty.config(text="No schedules yet.  A schedule is a named list of timed messages – for example “Son — School day” "
+                                           "with a recorded “Breakfast is ready” at 07:20 on weekdays.")
+            self.l_today_empty.pack(anchor="w", pady=(0, 8), before=self.ttree)
+            self.b_today_create.pack(anchor="w", pady=(0, 12), before=self.ttree)
+        elif not rows:
+            self.l_today_empty.config(text="Nothing is planned for today.  Schedules that are off or not set for this weekday are not shown.")
+            self.l_today_empty.pack(anchor="w", pady=(0, 8), before=self.ttree)
+        self._today_update_buttons()
+        self._refresh_today_countdown()
+
+    def _refresh_today_countdown(self) -> None:
+        ev = self.scheduler.next_event()
+        if self.current_ann:
+            e, sc = self.current_ann["event"], self.current_ann["schedule"]
+            self.l_today_next.config(text=f"▶ Playing now:  {e['label']}  ·  {sc['name']}  on {output_label(sc.get('output', ''))}")
+            if not self.b_stop_msg.winfo_ismapped():
+                self.b_stop_msg.pack(side="right")
+            return
+        self.b_stop_msg.pack_forget()
+        if ev:
+            what = "Next message" if ev[1].get("kind") == "event" else "Next alarm"
+            self.l_today_next.config(text=f"{what}:  {ev[1]['label']}  ·  {ev[0]:%A %d %b at %H:%M}  ·  in {fmt_delta(ev[0] - datetime.now())}")
+        else:
+            self.l_today_next.config(text="Nothing is due.  Turn on a schedule or set an alarm.")
+
+    def _today_toggle_earlier(self) -> None:
+        self._today_expanded = not self._today_expanded
+        self._refresh_today()
+
+    def _today_selected(self) -> dict | None:
+        sel = self.ttree.selection()
+        if not sel:
+            return None
+        return next((r for r in self._today_rows() if r["iid"] == sel[0]), None)
+
+    @staticmethod
+    def _can_skip(r: dict | None) -> bool:
+        """Only something that has not happened yet can be skipped for today."""
+        return bool(r and r["kind"] == "event" and r["dt"] >= datetime.now() - SCHEDULE_GRACE
+                    and r["status"] in ("Upcoming", "Skipped", "No sound"))
+
+    def _today_update_buttons(self) -> None:
+        r = self._today_selected()
+        self.b_today_skip.pack_forget(); self.b_today_unskip.pack_forget()
+        can = self._can_skip(r)
+        if r and r["kind"] == "event" and r["skipped"] and can:
+            self.b_today_unskip.pack(side="right")
+        else:
+            self.b_today_skip.pack(side="right")
+            self.b_today_skip.config(state="normal" if can and not (r and r["skipped"]) else "disabled")
+        self.b_today_preview.config(state="normal" if r and r["path"] and os.path.isfile(r["path"]) else "disabled")
+
+    def _today_menu(self, e) -> None:
+        iid = self.ttree.identify_row(e.y)
+        if iid:
+            self.ttree.selection_set(iid)
+            self._today_update_buttons()
+            r = self._today_selected()
+            self.today_menu.entryconfig("Skip today", state="normal" if self._can_skip(r) and not r["skipped"] else "disabled")
+            self.today_menu.entryconfig("Undo skip", state="normal" if self._can_skip(r) and r["skipped"] else "disabled")
+            self.today_menu.entryconfig("Preview sound", state="normal" if r and r["path"] and os.path.isfile(r["path"]) else "disabled")
+            self.today_menu.entryconfig("Stop message", state="normal" if self.current_ann else "disabled")
+            self.today_menu.tk_popup(e.x_root, e.y_root)
+
+    def _today_skip(self, on: bool) -> None:
+        r = self._today_selected()
+        if not r:
+            return
+        if r["kind"] != "event":
+            self.l_today_hint.config(text="Individual alarms are turned off in the Alarms view (select it there and press Turn on / off).")
+            return
+        today = datetime.now().date()
+        if not self._can_skip(r):
+            return
+        if on and self.store.is_skipped(today, r["sid"]):
+            return
+        if not on and self.store.is_skipped(today, r["sid"]):
+            # the whole schedule was skipped: bring back only this event, keep the others skipped
+            sc = self.store.get_schedule(r["sid"])
+            self.store.set_skip(today, r["sid"], None, False)
+            for other in (sc["events"] if sc else []):
+                if other["id"] != r["eid"]:
+                    self.store.set_skip(today, r["sid"], other["id"], True)
+        self.store.set_skip(today, r["sid"], r["eid"], on)
+        if on:
+            self._cancel_announcements(r["sid"], r["eid"], "skipped for today")
+        log(f"{'skip' if on else 'undo skip'} today: '{r['label']}' ({r['sched']})")
+        self.l_today_hint.config(text=(f"“{r['label']}” is skipped for today only. Tomorrow it runs as usual." if on
+                                       else f"“{r['label']}” is back on for today."))
+        self._refresh_today(); self._refresh_schedules(); self._apply_power(); self._tick_indicators()
+
+    def _today_preview(self) -> None:
+        r = self._today_selected()
+        if r:
+            self._preview_sound(r["path"], int(r["volume"]), r["out"], self.l_today_hint)
+
+    # ----- Schedules page
+    def _build_schedules(self) -> None:
+        P, F = self.PALETTE, self.F
+        page = self.pages["schedules"]
+        right = tk.Frame(page, bg=P["bg"])
+        right.pack(side="right", fill="y")
+        left = tk.Frame(page, bg=P["bg"])
+        left.pack(side="left", fill="both", expand=True, padx=(0, 14))
+
+        # list card
+        c1 = self._card(left, fill="both", expand=True)
+        row = ttk.Frame(c1, style="Card.TFrame")
+        row.pack(fill="x")
+        ttk.Label(row, text="Schedules", style="Title.TLabel").pack(side="left")
+        ttk.Button(row, text="＋  Create schedule", style="Accent.TButton", command=self._sched_new).pack(side="right")
+        cols = ("on", "name", "days", "output", "count")
+        self.stree = ttk.Treeview(c1, columns=cols, show="headings", height=3, selectmode="browse")
+        for c, (txt, w, st) in {"on": ("", 36, False), "name": ("Schedule", 140, True), "days": ("Repeats", 95, False),
+                                "output": ("Speaker", 110, True), "count": ("Events", 55, False)}.items():
+            self.stree.heading(c, text=txt, anchor="center" if c == "on" else "w")
+            self.stree.column(c, width=w, anchor="center" if c == "on" else "w", stretch=st)
+        self.stree.tag_configure("off", foreground=P["muted"])
+        self.stree.pack(fill="both", expand=True, pady=(12, 6))
+        self.stree.bind("<<TreeviewSelect>>", self._sched_on_select)
+        self.stree.bind("<Double-1>", lambda e: self._sched_toggle())
+        self.l_sched_empty = ttk.Label(c1, text="No schedules yet.  Create one for each person – for example “Son — School day” – "
+                                                "then add timed messages such as “Wake up” or “Breakfast is ready”.",
+                                       style="Muted.TLabel", justify="left", wraplength=420)
+        acts = ttk.Frame(c1, style="Card.TFrame")
+        acts.pack(fill="x")
+        self.b_sched_toggle = ttk.Button(acts, text="Turn on / off", style="Soft.TButton", command=self._sched_toggle)
+        self.b_sched_toggle.pack(side="left")
+        self.b_sched_dup = ttk.Button(acts, text="Duplicate", style="Soft.TButton", command=self._sched_duplicate)
+        self.b_sched_dup.pack(side="left", padx=8)
+        self.b_sched_skip = ttk.Button(acts, text="Skip today", style="Soft.TButton", command=self._sched_skip_today)
+        self.b_sched_skip.pack(side="left")
+        self.mb_sched_more = ttk.Menubutton(acts, text="⋯", style="Icon.TButton", direction="below", width=3)
+        m = tk.Menu(self.mb_sched_more, tearoff=0)
+        m.add_command(label="Delete schedule…", command=self._sched_delete)
+        self.mb_sched_more["menu"] = m
+        self.mb_sched_more.pack(side="right")
+        ttk.Label(c1, text="Tip: click a schedule to edit it, double-click to turn it on or off.  A skipped schedule runs again tomorrow.",
+                  style="Muted.TLabel", wraplength=420, justify="left").pack(anchor="w", pady=(8, 0))
+
+        # editor card
+        c2 = self._card(right, fill="both", expand=True)
+        self.sched_editor = c2
+        row = ttk.Frame(c2, style="Card.TFrame")
+        row.pack(fill="x")
+        self.l_sched_title = ttk.Label(row, text="New schedule", style="Title.TLabel")
+        self.l_sched_title.pack(side="left")
+        self.v_senabled = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row, text="Schedule is on", variable=self.v_senabled, style="Card.TCheckbutton").pack(side="right")
+        self.l_sched_saved = ttk.Label(row, text="", style="Good.TLabel")
+        self.l_sched_saved.pack(side="right", padx=(0, 16))
+        grid = ttk.Frame(c2, style="Card.TFrame")
+        grid.pack(fill="x", pady=(6, 0))
+        grid.columnconfigure(1, weight=1)
+
+        ttk.Label(grid, text="Name", style="Card.TLabel", width=9).grid(row=0, column=0, sticky="nw", pady=(6, 0))
+        self.v_sname = tk.StringVar()
+        self.e_sname = ttk.Entry(grid, textvariable=self.v_sname, font=F["base"], width=34)
+        self.e_sname.grid(row=0, column=1, sticky="w")
+        self.l_err_name = NoteLabel(grid, text="", style="Bad.TLabel")
+        self.l_err_name.grid(row=1, column=1, sticky="w"); self.l_err_name.grid_remove()
+
+        ttk.Label(grid, text="Repeats", style="Card.TLabel").grid(row=2, column=0, sticky="nw", pady=(12, 0))
+        days = ttk.Frame(grid, style="Card.TFrame")
+        days.grid(row=2, column=1, sticky="w", pady=(8, 0))
+        self.v_days = [tk.BooleanVar(value=i < 5) for i in range(7)]
+        for i, n in enumerate(DAY_NAMES):
+            ttk.Checkbutton(days, text=n, variable=self.v_days[i], style="Seg.Toolbutton").pack(side="left", padx=(0, 3))
+        short = ttk.Frame(grid, style="Card.TFrame")
+        short.grid(row=3, column=1, sticky="w", pady=(6, 0))
+        for txt, val in (("Weekdays", WEEKDAYS), ("Every day", EVERY_DAY), ("Weekends", WEEKEND)):
+            ttk.Button(short, text=txt, style="Soft.TButton", command=lambda v=val: self._sched_set_days(v)).pack(side="left", padx=(0, 4))
+        self.l_err_days = NoteLabel(grid, text="", style="Bad.TLabel")
+        self.l_err_days.grid(row=4, column=1, sticky="w"); self.l_err_days.grid_remove()
+
+        ttk.Label(grid, text="Speaker", style="Card.TLabel").grid(row=5, column=0, sticky="nw", pady=(14, 0))
+        spk = ttk.Frame(grid, style="Card.TFrame")
+        spk.grid(row=5, column=1, sticky="we", pady=(10, 0))
+        self.v_sched_output = tk.StringVar(value=self.DEFAULT_OUTPUT)
+        self.cb_sched_output = ttk.Combobox(spk, textvariable=self.v_sched_output, state="readonly", width=34)
+        self.cb_sched_output["values"] = list(self._output_map)
+        self.cb_sched_output.pack(side="left")
+        self.cb_sched_output.bind("<<ComboboxSelected>>", lambda e: self._on_output_selected(var=self.v_sched_output))
+        ttk.Button(spk, text="↻", style="Icon.TButton", command=lambda: self._refresh_outputs(load_airplay=True)).pack(side="left", padx=(4, 8))
+        ttk.Button(spk, text="🔈  Test speaker", style="Soft.TButton", command=self._sched_test_speaker).pack(side="left")
+
+        ttk.Label(grid, text="Volume", style="Card.TLabel").grid(row=6, column=0, sticky="nw", pady=(12, 0))
+        vol = ttk.Frame(grid, style="Card.TFrame")
+        vol.grid(row=6, column=1, sticky="w", pady=(8, 0))
+        self.v_svol = tk.IntVar(value=80)
+        ttk.Scale(vol, from_=0, to=100, orient="horizontal", variable=self.v_svol, length=260,
+                  command=lambda v: self.l_svol.config(text=f"{int(float(v))} %")).pack(side="left")
+        self.l_svol = ttk.Label(vol, text="80 %", style="Card.TLabel", font=F["bold"], width=6)
+        self.l_svol.pack(side="left", padx=(10, 0))
+
+        self.l_sched_hint = NoteLabel(grid, text="", style="Muted.TLabel", wraplength=600, justify="left")
+        self.l_sched_hint.grid(row=7, column=1, sticky="w", pady=(4, 0)); self.l_sched_hint.grid_remove()
+
+        ttk.Separator(c2).pack(fill="x", pady=6)
+
+        # events list, replaced by the event editor while an event is being edited
+        self.ev_list = ttk.Frame(c2, style="Card.TFrame")
+        self.ev_list.pack(fill="both", expand=True)
+        row = ttk.Frame(self.ev_list, style="Card.TFrame")
+        row.pack(fill="x")
+        ttk.Label(row, text="Events", style="Card.TLabel", font=F["bold"]).pack(side="left")
+        ttk.Button(row, text="＋  Add event", style="Accent.TButton", command=self._event_add).pack(side="right")
+        cols = ("time", "label", "sound", "on")
+        self.etree = ttk.Treeview(self.ev_list, columns=cols, show="headings", height=3, selectmode="browse")
+        for c, (txt, w, st) in {"time": ("Time", 70, False), "label": ("Activity", 200, True), "sound": ("Sound", 190, True), "on": ("", 50, False)}.items():
+            self.etree.heading(c, text=txt, anchor="w")
+            self.etree.column(c, width=w, anchor="w", stretch=st)
+        self.etree.tag_configure("off", foreground=P["muted"])
+        self.etree.pack(fill="both", expand=True, pady=(8, 6))
+        self.etree.bind("<Double-1>", lambda e: self._event_edit())
+        self.l_ev_empty = ttk.Label(self.ev_list, text="No events yet.  Press Add event – each event needs only a time, a name and (optionally) a message.",
+                                    style="Muted.TLabel")
+        erow = ttk.Frame(self.ev_list, style="Card.TFrame")
+        erow.pack(fill="x")
+        ttk.Button(erow, text="Edit event", style="Soft.TButton", command=self._event_edit).pack(side="left")
+        ttk.Button(erow, text="Remove event", style="Danger.TButton", command=self._event_remove).pack(side="left", padx=8)
+        ttk.Label(erow, text="Events use the schedule's days, speaker and volume.", style="Muted.TLabel").pack(side="right")
+
+        self._build_event_editor(c2)
+
+        save = ttk.Frame(c2, style="Card.TFrame")
+        save.pack(fill="x", pady=(10, 0), side="bottom")
+        self.b_sched_save = ttk.Button(save, text="Save schedule", style="Accent.TButton", command=self._sched_save)
+        self.b_sched_save.pack(side="left")
+        ttk.Button(save, text="Cancel", style="Soft.TButton", command=self._sched_cancel).pack(side="left", padx=8)
+        self.l_sched_err = ttk.Label(save, text="", style="Bad.TLabel")
+        self.l_sched_err.pack(side="left", padx=12)
+
+    def _build_event_editor(self, parent) -> None:
+        P, F = self.PALETTE, self.F
+        box = self.ev_box = ttk.Frame(parent, style="Card.TFrame")       # packed in place of ev_list while editing
+        row = ttk.Frame(box, style="Card.TFrame")
+        row.pack(fill="x")
+        self.l_ev_title = ttk.Label(row, text="New event", style="Card.TLabel", font=F["bold"])
+        self.l_ev_title.pack(side="left")
+        g = ttk.Frame(box, style="Card.TFrame")
+        g.pack(fill="x", pady=(8, 0))
+        ttk.Label(g, text="Time", style="Card.TLabel", width=9).grid(row=0, column=0, sticky="w")
+        t = ttk.Frame(g, style="Card.TFrame")
+        t.grid(row=0, column=1, sticky="w")
+        self.v_eh = tk.StringVar(value="07"); self.v_em = tk.StringVar(value="00")
+        ttk.Spinbox(t, from_=0, to=23, width=3, textvariable=self.v_eh, format="%02.0f", wrap=True, font=F["time"], justify="center").pack(side="left")
+        ttk.Label(t, text=":", style="Card.TLabel", font=F["time"]).pack(side="left", padx=4)
+        ttk.Spinbox(t, from_=0, to=59, width=3, textvariable=self.v_em, format="%02.0f", wrap=True, font=F["time"], justify="center").pack(side="left")
+        ttk.Label(t, text="Activity", style="Card.TLabel").pack(side="left", padx=(22, 8))
+        self.v_elabel = tk.StringVar()
+        self.e_elabel = ttk.Entry(t, textvariable=self.v_elabel, font=F["base"], width=24)
+        self.e_elabel.pack(side="left")
+        self.v_eon = tk.BooleanVar(value=True)
+        ttk.Checkbutton(t, text="On", variable=self.v_eon, style="Card.TCheckbutton").pack(side="left", padx=(14, 0))
+        self.l_err_event = NoteLabel(g, text="", style="Bad.TLabel")
+        self.l_err_event.grid(row=1, column=1, sticky="w"); self.l_err_event.grid_remove()
+
+        ttk.Label(g, text="Message", style="Card.TLabel").grid(row=2, column=0, sticky="nw", pady=(8, 0))
+        snd = ttk.Frame(g, style="Card.TFrame")
+        snd.grid(row=2, column=1, sticky="we", pady=(6, 0))
+        # state A: the chosen sound (or none)
+        self.ev_sound_row = ttk.Frame(snd, style="Card.TFrame")
+        self.ev_sound_row.pack(fill="x")
+        self.l_ev_sound = ttk.Label(self.ev_sound_row, text="No sound – the event is shown in Today but nothing plays", style="Card.TLabel", wraplength=330, justify="left")
+        self.l_ev_sound.pack(side="left")
+        self.b_ev_preview = ttk.Button(self.ev_sound_row, text="▶  Preview", style="Soft.TButton", command=self._event_preview)
+        self.b_ev_remove = ttk.Button(self.ev_sound_row, text="Remove sound", style="Soft.TButton", command=self._event_remove_sound)
+        pick = ttk.Frame(snd, style="Card.TFrame")
+        pick.pack(fill="x", pady=(8, 0))
+        self.ev_pick_row = pick
+        self.b_ev_rec = ttk.Button(pick, text="🎤  Record my voice", style="Soft.TButton", command=self._ev_record_start)
+        self.b_ev_rec.pack(side="left")
+        ttk.Button(pick, text="Choose audio file…", style="Soft.TButton", command=self._event_choose_file).pack(side="left", padx=8)
+        ttk.Label(pick, text="Microphone", style="Muted.TLabel").pack(side="left", padx=(16, 6))
+        self.cb_ev_mic = ttk.Combobox(pick, textvariable=self.v_mic, state="readonly", width=22, values=[d[1] for d in self.devices], font=F["small"])
+        self.cb_ev_mic.pack(side="left")
+        # state B: recording in progress
+        self.ev_rec_row = ttk.Frame(snd, style="Card.TFrame")
+        self.l_ev_rec = ttk.Label(self.ev_rec_row, text="●  Recording…", style="Rec.TLabel", wraplength=300, justify="left")
+        self.l_ev_rec.pack(side="left")
+        self.ev_meter = ttk.Progressbar(self.ev_rec_row, length=120, maximum=100, style="Meter.Horizontal.TProgressbar")
+        self.ev_meter.pack(side="left", padx=12)
+        ttk.Button(self.ev_rec_row, text="■  Stop recording", style="Danger.TButton", command=self._ev_record_stop).pack(side="left")
+        ttk.Button(self.ev_rec_row, text="Cancel", style="Soft.TButton", command=self._ev_record_cancel).pack(side="left", padx=8)
+        # state C: a take waiting for a decision
+        self.ev_take_row = ttk.Frame(snd, style="Card.TFrame")
+        self.l_ev_take = ttk.Label(self.ev_take_row, text="", style="Card.TLabel", wraplength=560, justify="left")
+        self.l_ev_take.pack(anchor="w")
+        tb = ttk.Frame(self.ev_take_row, style="Card.TFrame")
+        tb.pack(fill="x", pady=(6, 0))
+        ttk.Button(tb, text="▶  Preview", style="Soft.TButton", command=lambda: self._preview_sound(self.ev_take, int(self.v_svol.get()), self._get_output(self.v_sched_output), self.l_ev_hint)).pack(side="left")
+        ttk.Button(tb, text="Record again", style="Soft.TButton", command=self._ev_record_again).pack(side="left", padx=8)
+        ttk.Button(tb, text="Use recording", style="Accent.TButton", command=self._ev_take_use).pack(side="left")
+        ttk.Button(tb, text="Discard", style="Soft.TButton", command=self._ev_take_discard).pack(side="left", padx=8)
+        self.l_ev_hint = ttk.Label(snd, text="", style="Muted.TLabel", wraplength=560, justify="left")
+        self.l_ev_hint.pack(anchor="w", pady=(6, 0))
+
+        done = ttk.Frame(box, style="Card.TFrame")
+        done.pack(fill="x", pady=(8, 0))
+        ttk.Button(done, text="Done", style="Accent.TButton", command=self._event_done).pack(side="left")
+        ttk.Button(done, text="Cancel", style="Soft.TButton", command=self._event_cancel).pack(side="left", padx=8)
+        ttk.Label(done, text="Done keeps the event in the list – press Save schedule to store it.", style="Muted.TLabel").pack(side="left", padx=8)
+
     def _toggle_more(self) -> None:
         if self.more_card_outer.winfo_ismapped():
             self.more_card_outer.pack_forget()
@@ -1281,11 +2158,17 @@ class App(tk.Tk):
 
     LOAD_AIRPLAY = "__load_airplay__"
 
+    def _output_boxes(self) -> list[tuple]:
+        boxes = [(self.cb_output, self.v_output)]
+        if hasattr(self, "cb_sched_output"):
+            boxes.append((self.cb_sched_output, self.v_sched_output))
+        return boxes
+
     def _refresh_outputs(self, load_airplay: bool = False) -> None:
         """Fill 'Play on': system default, local devices, then AirPlay speakers (macOS, read from Music).
         AirPlay devices are only read when Music is already running, or when the user asks (↻ / list entry),
         so opening the alarm clock never opens Music by itself."""
-        current = self._get_output()
+        currents = [(var, self._get_output(var)) for _cb, var in self._output_boxes()]
         self._output_map = {self.DEFAULT_OUTPUT: ""}
         for n in Player.output_devices():
             self._output_map[n] = n
@@ -1300,39 +2183,45 @@ class App(tk.Tk):
                     self.l_form_hint.config(text=f"Could not read AirPlay speakers from Music: {e}")
             if not any(v.startswith(AirPlayPlayer.PREFIX) for v in self._output_map.values()):
                 self._output_map["AirPlay speakers…  (select to load them from Music)"] = self.LOAD_AIRPLAY
-        self.cb_output["values"] = list(self._output_map)
-        self._set_output(current)
+        for cb, _var in self._output_boxes():
+            cb["values"] = list(self._output_map)
+        for var, current in currents:
+            self._set_output(current, var)
 
-    def _on_output_selected(self, _e=None) -> None:
-        if self._output_map.get(self.v_output.get()) == self.LOAD_AIRPLAY:
+    def _on_output_selected(self, _e=None, var: tk.StringVar | None = None) -> None:
+        var = var or self.v_output
+        if self._output_map.get(var.get()) == self.LOAD_AIRPLAY:
             self._refresh_outputs(load_airplay=True)
             first = next((lbl for lbl, v in self._output_map.items() if v.startswith(AirPlayPlayer.PREFIX)), None)
-            self.v_output.set(first or self.DEFAULT_OUTPUT)
+            var.set(first or self.DEFAULT_OUTPUT)
             if not first:
-                self.l_form_hint.config(text="Music found no AirPlay speakers. Check they are on and on the same Wi-Fi.")
+                hint = self.l_form_hint if var is self.v_output else self.l_sched_hint
+                hint.config(text="Music found no AirPlay speakers. Check they are on and on the same Wi-Fi.")
 
-    def _set_output(self, value: str) -> None:
-        """Show an alarm's output in the combobox, even if that device is currently unplugged/offline."""
+    def _set_output(self, value: str, var: tk.StringVar | None = None) -> None:
+        """Show an output in a combobox, even if that device is currently unplugged/offline."""
+        var = var or self.v_output
         for label, v in self._output_map.items():
             if v == value:
-                self.v_output.set(label)
+                var.set(label)
                 return
         if value:
             label = output_label(value) + "  (not connected)"
             self._output_map[label] = value
-            self.cb_output["values"] = list(self._output_map)
-            self.v_output.set(label)
+            for cb, _v in self._output_boxes():
+                cb["values"] = list(self._output_map)
+            var.set(label)
         else:
-            self.v_output.set(self.DEFAULT_OUTPUT)
+            var.set(self.DEFAULT_OUTPUT)
 
-    def _get_output(self) -> str:
-        v = self._output_map.get(self.v_output.get(), "")
+    def _get_output(self, var: tk.StringVar | None = None) -> str:
+        v = self._output_map.get((var or self.v_output).get(), "")
         return "" if v == self.LOAD_AIRPLAY else v
 
     def _is_airplay(self, value: str) -> bool:
         return bool(self.airplay) and value.startswith(AirPlayPlayer.PREFIX)
 
-    def _play_airplay(self, alarm: dict | None, path: str, volume: int, device: str, loop: bool, fade: int) -> None:
+    def _play_airplay(self, alarm: dict | None, path: str, volume: int, device: str, loop: bool, fade: int, hint=None) -> None:
         """Start AirPlay playback in a worker thread; failures come back through the event queue."""
         def work():
             try:
@@ -1343,7 +2232,7 @@ class App(tk.Tk):
             except Exception as e:
                 log(f"AirPlay playback failed ({device}): {e}")
                 self.events.put(("airplay_failed", alarm, f"{e}"))
-        self.l_form_hint.config(text=f"Sending to AirPlay speaker “{device}” via Music…")
+        (hint or self.l_form_hint).config(text=f"Sending to AirPlay speaker “{device}” via Music…")
         threading.Thread(target=work, daemon=True).start()
 
     def _stop_airplay(self) -> None:
@@ -1486,6 +2375,9 @@ class App(tk.Tk):
         if not p or not os.path.isfile(p):
             messagebox.showerror(APP_NAME, "Choose a sound file or record your voice first.")
             return
+        if self.current_ann:
+            self.l_form_hint.config(text="A schedule message is playing right now. Stop it first (■ Stop message in the header), then preview.")
+            return
         out = self._get_output()
         if self._is_airplay(out):
             self._play_airplay(None, p, int(self.v_volume.get()), out[len(AirPlayPlayer.PREFIX):], loop=False, fade=0)
@@ -1501,6 +2393,8 @@ class App(tk.Tk):
                                  f"Details: {e}")
 
     def _stop_all(self) -> None:
+        if self.current_ann:
+            self._finish_announcement("stopped", "stopped by you")
         self.player.stop()
         self._stop_airplay()
         for aid in list(self.ring_windows):
@@ -1519,6 +2413,8 @@ class App(tk.Tk):
     def _refresh_mics(self) -> None:
         self.devices = Recorder.input_devices()
         self.cb_mic["values"] = [d[1] for d in self.devices]
+        if hasattr(self, "cb_ev_mic"):
+            self.cb_ev_mic["values"] = [d[1] for d in self.devices]
         if self.devices:
             self.v_mic.set(self.devices[0][1])
 
@@ -1560,6 +2456,7 @@ class App(tk.Tk):
                                  f"{e}\n\nOn macOS make sure this app (or Terminal) is allowed to use the "
                                  "microphone in System Settings → Privacy & Security → Microphone.")
             return
+        self._rec_owner = "alarm"
         self.b_rec.config(text="■ Stop")
         self.l_rec.config(text="Recording…", foreground="")
         self._update_meter()
@@ -1590,6 +2487,15 @@ class App(tk.Tk):
         self.store.save()
         self._apply_power()
 
+    def _remember_wake(self, when: datetime | None) -> None:
+        """Called from the power worker thread: persist the registered wake so the next launch can cancel it."""
+        with self.store.lock:
+            self.store.settings["registered_wake"] = when.isoformat(timespec="seconds") if when else ""
+            try:
+                self.store.save()
+            except OSError as e:
+                log(f"could not remember the registered wake: {e}")
+
     def _retry_wake(self) -> None:
         ev = self.scheduler.next_event()
         self.power.retry_wake(ev[0] if ev else None)
@@ -1618,7 +2524,7 @@ class App(tk.Tk):
         s = self.store.settings
         ev = self.scheduler.next_event()
         armed = ev is not None
-        playing = bool(self.ring_windows)
+        playing = bool(self.ring_windows) or self.current_ann is not None
         self.power.set_keep_awake(bool(s["keep_awake"]) and (armed or playing))
         self.power.set_wake(ev[0] if (armed and s["schedule_wake"]) else None)
 
@@ -1629,17 +2535,21 @@ class App(tk.Tk):
         if self.ring_windows:
             playing_only = len(self.ring_windows) == len(self.once_play)
             self._set_pill(self.l_armed, "▶  Playing now" if playing_only else "🔔  Ringing now", "ring")
+        elif self.current_ann:
+            self._set_pill(self.l_armed, "▶  Playing a message", "ring")
+        elif ev and ev[1].get("kind") == "event":
+            self._set_pill(self.l_armed, f"●  Message set · plays in {fmt_delta(ev[0] - now)}", "good")
         elif ev:
             self._set_pill(self.l_armed, f"●  Alarm set · rings in {fmt_delta(ev[0] - now)}", "good")
         else:
             self._set_pill(self.l_armed, "○  No alarm set", "neutral")
         if self.power.keeping_awake:
             self._set_pill(self.l_awake, "●  Computer will stay awake", "good")
-        elif self.ring_windows and not s.get("keep_awake"):
+        elif (self.ring_windows or self.current_ann) and not s.get("keep_awake"):
             self._set_pill(self.l_awake, "△  Computer may fall asleep while playing (option is off)", "warn")
         elif ev and not s.get("keep_awake"):
             self._set_pill(self.l_awake, "△  Computer may fall asleep (option is off)", "warn")
-        elif ev or self.ring_windows:
+        elif ev or self.ring_windows or self.current_ann:
             self._set_pill(self.l_awake, "△  Could not keep the computer awake", "bad")
         else:
             self._set_pill(self.l_awake, "○  Not keeping the computer awake", "neutral")
@@ -1664,6 +2574,11 @@ class App(tk.Tk):
             self.b_retry_wake.pack(side="left", padx=6)
         else:
             self.b_retry_wake.pack_forget()
+        if self.current_ann and not self.ring_windows:        # one click to silence a message from any view
+            if not self.b_stop_hdr.winfo_ismapped():
+                self.b_stop_hdr.pack(side="left", padx=6)
+        else:
+            self.b_stop_hdr.pack_forget()
 
     def _tick_status(self) -> None:
         ev = self.scheduler.next_event()
@@ -1671,9 +2586,12 @@ class App(tk.Tk):
         self.l_clock.config(text=f"{now:%H:%M}")
         self.l_date.config(text=f"{now:%A, %d %B %Y}   {now:%S}s")
         if ev:
-            self.l_next.config(text=f"Next alarm:  {ev[1]['label']}  ·  {ev[0]:%A %d %b at %H:%M}  ·  in {fmt_delta(ev[0] - now)}")
+            what = "Next message" if ev[1].get("kind") == "event" else "Next alarm"
+            self.l_next.config(text=f"{what}:  {ev[1]['label']}  ·  {ev[0]:%A %d %b at %H:%M}  ·  in {fmt_delta(ev[0] - now)}")
         else:
-            self.l_next.config(text="No alarm set yet.  Set one up below – it takes three steps.")
+            self.l_next.config(text="Nothing is set yet.  Create a schedule, or set an alarm – it takes three steps.")
+        if self.v_page.get() == "today":
+            self._refresh_today_countdown()
         self.l_status.config(text=f"Alarms and recordings are kept in {BASE_DIR}")
         self._tick_indicators()
         if (self.airplay and ev and self._is_airplay(ev[1].get("output", "")) and self._prewarmed != ev[1]["id"]
@@ -1684,6 +2602,8 @@ class App(tk.Tk):
         if now.second == 0:
             sel = self.tree.selection()
             self._refresh_list(select=sel[0] if sel else None)
+            if self.v_page.get() == "today":
+                self._refresh_today()
         self.after(1000, self._tick_status)
 
     def _poll_events(self) -> None:
@@ -1694,9 +2614,20 @@ class App(tk.Tk):
                     self._ring(a, when)
                 elif kind == "notice":
                     self.l_form_hint.config(text=when)
+                elif kind == "announce":
+                    self.announcements.push(a)
+                    self._pump_announcements()
+                elif kind == "occurrence":
+                    self._apply_power(); self._tick_indicators()
+                    if self.v_page.get() == "today":
+                        self._refresh_today()
                 elif kind == "finished":
                     if a in self.once_play:           # ignore if the user already pressed STOP
                         self._dismiss(a, finished=True)
+                    elif self.current_ann and a == "ann:" + self.current_ann["key"]:
+                        self._finish_announcement("played")
+                elif kind == "airplay_failed" and a is not None and str(a.get("id", "")).startswith("ann:"):
+                    self._announcement_airplay_failed(a, when)
                 elif kind == "airplay_failed":
                     self.l_form_hint.config(text=f"AirPlay failed: {when}  –  playing on this computer instead.")
                     self.bell()
@@ -1716,6 +2647,7 @@ class App(tk.Tk):
                                 self.after(0, lambda aid=a["id"]: self._dismiss(aid))
                 elif kind == "missed":
                     self._refresh_list()
+                    self._apply_power(); self._tick_indicators()
                     messagebox.showwarning(APP_NAME, f"Alarm “{a['label']}” was missed (it was due {when:%a %H:%M} "
                                                      "while the computer was off or asleep).")
         except queue.Empty:
@@ -1738,6 +2670,9 @@ class App(tk.Tk):
             problem = (f"The sound file for “{a['label']}” is missing:\n{a['sound']}\n\n"
                        "It may have been moved or deleted. Choose another file below and save the alarm.")
         elif use_airplay:
+            if self.current_ann and self.current_ann.get("via") == "airplay":
+                log(f"routine message '{self.current_ann['event']['label']}' interrupted by AirPlay alarm {a['id']}")
+                self._finish_announcement("interrupted", "an alarm rang during this message", stop_audio=False)
             self._play_airplay(a, a["sound"], int(a["volume"]), a["output"][len(AirPlayPlayer.PREFIX):], loop=not once, fade=fade)
         else:
             try:
@@ -1811,6 +2746,9 @@ class App(tk.Tk):
     def _take_local_stream(self, aid: str) -> None:
         """pygame has one music stream: note who owns it and close a whole-file play it just interrupted."""
         self._local_owner = aid
+        if self.current_ann and self.current_ann.get("via") == "local":
+            log(f"routine message '{self.current_ann['event']['label']}' interrupted by alarm {aid}")
+            self._finish_announcement("interrupted", "an alarm rang during this message", stop_audio=False)
         for other, st in list(self.once_play.items()):
             if other != aid and st["via"] == "local":
                 log(f"whole-file play {other} interrupted by {aid}")
@@ -1875,8 +2813,11 @@ class App(tk.Tk):
                 self._fade_job = None
         if not self.ring_windows:
             self.player.stop()
-            self._stop_airplay()
+            gone = self.store.get(alarm_id) or {}
+            if not (self.current_ann and self.current_ann.get("via") == "airplay") or self._is_airplay(gone.get("output", "")):
+                self._stop_airplay()
             self.b_stop.pack_forget()
+            self.after(400, self._pump_announcements)
             if self._fade_job:
                 self.after_cancel(self._fade_job)
                 self._fade_job = None
@@ -1888,16 +2829,667 @@ class App(tk.Tk):
         self._apply_power()
         self._tick_indicators()
 
+
+    # ================================================================== schedules: list
+    def _sched_selected(self) -> dict | None:
+        sel = self.stree.selection()
+        return self.store.get_schedule(sel[0]) if sel else None
+
+    def _refresh_schedules(self) -> None:
+        today = date.today()
+        keep = self.stree.selection()
+        self.stree.delete(*self.stree.get_children())
+        for sc in sorted(self.store.schedules, key=lambda x: (not x["enabled"], x["name"].lower())):
+            skipped = self.store.is_skipped(today, sc["id"])
+            self.stree.insert("", "end", iid=sc["id"], tags=("on" if sc["enabled"] else "off",), values=(
+                "●" if sc["enabled"] else "○", sc["name"] or "(no name)",
+                days_label(sc["days"]) + ("  · skipped today" if skipped else ""),
+                output_label(sc.get("output", "")), len(sc["events"])))
+        want = keep[0] if keep and self.stree.exists(keep[0]) else (self.sdraft["id"] if self.sdraft and self.stree.exists(self.sdraft["id"]) else None)
+        if want and self.stree.selection() != (want,):
+            self.stree.selection_set(want)          # (a changed selection fires _sched_on_select once)
+        if self.store.schedules:
+            self.l_sched_empty.pack_forget()
+        elif not self.l_sched_empty.winfo_ismapped():
+            self.l_sched_empty.pack(anchor="w", pady=(0, 10), before=self.b_sched_toggle.master)
+        self._sched_update_buttons()
+
+    def _sched_update_buttons(self) -> None:
+        today = date.today()
+        sc = self._sched_selected()
+        has = sc is not None
+        for b in (self.b_sched_toggle, self.b_sched_dup, self.b_sched_skip, self.mb_sched_more):
+            b.config(state="normal" if has else "disabled")
+        self.b_sched_skip.config(text="Undo skip" if has and self.store.is_skipped(today, sc["id"]) else "Skip today")
+        if hasattr(self, "cb_today_filter"):
+            self.cb_today_filter["values"] = ["All schedules"] + [x["name"] for x in self.store.schedules]
+
+    def _sched_on_select(self, _e=None) -> None:
+        sc = self._sched_selected()
+        self._sched_update_buttons()
+        if not sc or (self.sdraft and self.sdraft["id"] == sc["id"]):
+            return
+        if self.sdraft and not self._sched_confirm_discard():
+            self.stree.selection_set(self.sdraft["id"]) if self.stree.exists(self.sdraft["id"]) else self.stree.selection_remove(*self.stree.selection())
+            return
+        self._sched_load(sc)
+
+    def _sched_toggle(self) -> None:
+        sc = self._sched_selected()
+        if not sc:
+            return
+        sc = dict(sc, enabled=not sc["enabled"])
+        self.store.upsert_schedule(sc)
+        if not sc["enabled"]:
+            self._cancel_announcements(sc["id"], None, "schedule was turned off")
+        else:
+            self._mark_past_events(sc)
+        if self.sdraft and self.sdraft["id"] == sc["id"]:
+            self.sdraft["enabled"] = sc["enabled"]; self.v_senabled.set(sc["enabled"])
+            self.sdraft_saved = json.dumps(sc, sort_keys=True)
+        log(f"schedule '{sc['name']}' turned {'on' if sc['enabled'] else 'off'}")
+        self._after_schedule_change()
+
+    def _sched_duplicate(self) -> None:
+        sc = self._sched_selected()
+        if not sc or (self.sdraft and not self._sched_confirm_discard()):
+            return
+        d = duplicate_schedule(sc)
+        self.store.upsert_schedule(d)
+        self._refresh_schedules()
+        self.stree.selection_set(d["id"])
+        self._sched_load(d)
+        self.l_sched_hint.config(text="This copy is switched off until you save it with “Schedule is on”.")
+
+    def _sched_skip_today(self) -> None:
+        sc = self._sched_selected()
+        if not sc:
+            return
+        today = date.today()
+        on = not self.store.is_skipped(today, sc["id"])
+        self.store.set_skip(today, sc["id"], None, on)
+        if on:
+            self._cancel_announcements(sc["id"], None, "skipped for today")
+        log(f"{'skip' if on else 'undo skip'} today: schedule '{sc['name']}'")
+        self.l_sched_hint.config(text=(f"“{sc['name']}” is skipped for today only – it runs again tomorrow." if on
+                                       else f"“{sc['name']}” is back on for today."))
+        self._after_schedule_change()
+
+    def _sched_delete(self) -> None:
+        sc = self._sched_selected()
+        if not sc:
+            return
+        n = len(sc["events"])
+        if not messagebox.askyesno(APP_NAME, f"Delete “{sc['name']}” and its {n} event{'s' if n != 1 else ''}?\n\n"
+                                             "Recordings and audio files are kept."):
+            return
+        self._cancel_announcements(sc["id"], None, "schedule was deleted")
+        self.store.delete_schedule(sc["id"])
+        log(f"schedule '{sc['name']}' deleted")
+        if self.sdraft and self.sdraft["id"] == sc["id"]:
+            self.sdraft = None
+            self._sched_load(new_schedule(self.store.settings))
+        self._after_schedule_change()
+
+    def _after_schedule_change(self) -> None:
+        self._refresh_schedules(); self._refresh_today(); self._apply_power(); self._tick_indicators()
+
+    def _mark_past_events(self, sc: dict) -> None:
+        """Events whose time today has already passed when a schedule is saved/turned on must not play late."""
+        now = datetime.now()
+        for ev in sc["events"]:
+            due = self.store.event_due(sc, ev, now.date())
+            if due and due <= now:
+                self.store.record(occurrence_key(sc["id"], ev["id"], now.date()), "missed", "its time had already passed when saved")
+
+    # ================================================================== schedules: editor
+    def _sched_load(self, sc: dict) -> None:
+        if self._ev_recording():
+            self._ev_record_cancel()
+        self._ev_take_discard(silent=True)
+        stored = self.store.get_schedule(sc["id"])
+        self.sdraft = json.loads(json.dumps(sc))
+        self.sdraft_saved = json.dumps(stored, sort_keys=True) if stored else ""
+        self.v_sname.set(sc["name"])
+        for i in range(7):
+            self.v_days[i].set(i in sc["days"])
+        self._set_output(sc.get("output", ""), self.v_sched_output)
+        self.v_svol.set(int(sc["volume"])); self.l_svol.config(text=f"{int(sc['volume'])} %")
+        self.v_senabled.set(bool(sc["enabled"]))
+        self.l_sched_title.config(text=f"Editing “{sc['name']}”" if stored else "New schedule")
+        for lab in (self.l_err_name, self.l_err_days, self.l_sched_err, self.l_sched_hint, self.l_sched_saved):
+            lab.config(text="")
+        self.ev_draft = None
+        self._event_show_editor(False)
+        self._refresh_events()
+
+    def _sched_new(self) -> None:
+        if self.sdraft and not self._sched_confirm_discard():
+            return
+        self.stree.selection_remove(*self.stree.selection())
+        self._sched_load(new_schedule(self.store.settings))
+        self._refresh_schedules()
+        self.l_sched_hint.config(text="Name it, pick the days and speaker, then add events. It stays off until saved as on.")
+        self.e_sname.focus_set()
+
+    def _sched_read_form(self) -> None:
+        if not self.sdraft:
+            return
+        self.sdraft.update(name=self.v_sname.get().strip(), days=[i for i in range(7) if self.v_days[i].get()],
+                           output=self._get_output(self.v_sched_output), volume=int(self.v_svol.get()),
+                           enabled=bool(self.v_senabled.get()))
+
+    def _sched_dirty(self) -> bool:
+        if not self.sdraft:
+            return False
+        self._sched_read_form()
+        if self.ev_draft is not None:
+            return True
+        if not self.sdraft_saved:
+            return bool(self.sdraft["name"] or self.sdraft["events"])
+        return json.dumps(self.sdraft, sort_keys=True) != self.sdraft_saved
+
+    def _sched_confirm_discard(self) -> bool:
+        """True when it is fine to leave the editor (nothing unsaved, or the user chose to drop the changes)."""
+        if not self._sched_dirty():
+            return True
+        name = self.sdraft.get("name") or "this schedule"
+        if messagebox.askyesno(APP_NAME, f"You have unsaved changes to “{name}”.\n\nDiscard them?"):
+            if self._ev_recording():
+                self._ev_record_cancel()
+            self._ev_take_discard(silent=True)
+            self.ev_draft = None
+            self.sdraft = None
+            return True
+        return False
+
+    def _sched_set_days(self, days) -> None:
+        for i in range(7):
+            self.v_days[i].set(i in days)
+
+    def _sched_test_speaker(self) -> None:
+        self._preview_sound(self._tone_path(), int(self.v_svol.get()), self._get_output(self.v_sched_output), self.l_sched_hint,
+                            what="test sound")
+
+    def _tone_path(self) -> str:
+        """A short two-note chime for 'Test speaker', generated once into the recordings folder's cache."""
+        path = os.path.join(REC_DIR, ".test-tone.wav")
+        if not os.path.isfile(path):
+            import math, struct
+            rate, frames = 22050, bytearray()
+            for i in range(int(rate * 1.2)):
+                t = i / rate
+                f = 660 if t < 0.6 else 880
+                v = math.exp(-3 * (t % 0.6)) * math.sin(2 * math.pi * f * t)
+                frames += struct.pack("<h", int(v * 14000))
+            os.makedirs(REC_DIR, exist_ok=True)
+            with wave.open(path, "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(bytes(frames))
+        return path
+
+    def _sched_save(self) -> None:
+        if not self.sdraft:
+            return
+        if self.ev_draft is not None:                 # finish the open event first; stop if it is not valid
+            self._event_done()
+            if self.ev_draft is not None:
+                return
+        self._sched_read_form()
+        errs = validate_schedule(self.sdraft)
+        self.l_err_name.config(text=errs.get("name", ""))
+        self.l_err_days.config(text=errs.get("days", ""))
+        bad_events = [k for k in errs if k.startswith("event:")]
+        self.l_sched_err.config(text="One of the events needs attention – see the list." if bad_events else "")
+        if bad_events:
+            eid = bad_events[0].split(":", 1)[1]
+            if self.etree.exists(eid):
+                self.etree.selection_set(eid)
+        if errs:
+            return
+        sc = self.sdraft
+        for ev in sc["events"]:
+            ev["sound"] = portable_sound(ev.get("sound", ""))
+            ev["label"] = ev["label"].strip()
+        sc["events"].sort(key=lambda e: e["time"])
+        stored = self.store.get_schedule(sc["id"]) or {"enabled": False, "events": []}
+        was_on = bool(stored.get("enabled"))
+        now = datetime.now()
+        old_times = {e["id"]: e["time"] for e in stored["events"]}
+        with self.store.lock:
+            for ev in sc["events"]:
+                key = occurrence_key(sc["id"], ev["id"], now.date())
+                try:
+                    later = datetime.combine(now.date(), alarm_time(ev)) > now
+                except ValueError:
+                    later = False
+                if ev["id"] in old_times and old_times[ev["id"]] != ev["time"] and later and key in self.store.occurrences:
+                    self.store.occurrences.pop(key)           # moved to a later time today: let it play then
+        self.store.upsert_schedule(json.loads(json.dumps(sc)))
+        self.store.settings.update({"last_output": sc["output"], "last_volume": sc["volume"]})
+        self.store.save()
+        if sc["enabled"]:
+            self._mark_past_events(sc)
+        self._cancel_announcements(sc["id"], None, "schedule was changed", keep_playing=True)
+        if not sc["enabled"] and was_on:
+            self._cancel_announcements(sc["id"], None, "schedule was turned off")
+        self.sdraft_saved = json.dumps(self.store.get_schedule(sc["id"]), sort_keys=True)
+        self.l_sched_title.config(text=f"Editing “{sc['name']}”")
+        nxt = self.store.next_announcement()
+        on_text = ("Saved – it is off, nothing plays until you turn it on." if not sc["enabled"] else
+                   "Saved – the schedule is on.")
+        self.l_sched_hint.config(text=on_text)
+        self.l_sched_saved.config(text="✓ Saved")
+        if self._saved_job:
+            self.after_cancel(self._saved_job)
+        self._saved_job = self.after(4000, lambda: self.l_sched_saved.config(text=""))
+        log(f"schedule '{sc['name']}' saved ({len(sc['events'])} events, {'on' if sc['enabled'] else 'off'})")
+        self._after_schedule_change()
+        self.stree.selection_set(sc["id"])
+
+    def _sched_cancel(self) -> None:
+        if not self.sdraft:
+            return
+        stored = self.store.get_schedule(self.sdraft["id"])
+        if self._sched_dirty() and not messagebox.askyesno(APP_NAME, "Throw away the changes you made here?"):
+            return
+        if self._ev_recording():
+            self._ev_record_cancel()
+        self._ev_take_discard(silent=True)
+        self.ev_draft = None
+        self._sched_load(stored or new_schedule(self.store.settings))
+        if not stored:
+            self.stree.selection_remove(*self.stree.selection())
+        self._refresh_schedules()
+
+    # ================================================================== events (inside the schedule editor)
+    def _refresh_events(self) -> None:
+        keep = self.etree.selection()
+        self.etree.delete(*self.etree.get_children())
+        for ev in sorted(self.sdraft["events"], key=lambda e: e["time"]) if self.sdraft else []:
+            path = resolve_sound(ev.get("sound", ""))
+            snd = ("No sound" if not path else "Missing file" if not os.path.isfile(path)
+                   else "🎤 Recording" if path.startswith(REC_DIR) else os.path.basename(path))
+            self.etree.insert("", "end", iid=ev["id"], tags=("on" if ev["enabled"] else "off",),
+                              values=(ev["time"], ev["label"] or "(no name)", snd, "on" if ev["enabled"] else "off"))
+        if keep and self.etree.exists(keep[0]):
+            self.etree.selection_set(keep[0])
+        if self.sdraft and self.sdraft["events"]:
+            self.l_ev_empty.pack_forget()
+        elif not self.l_ev_empty.winfo_ismapped():
+            self.l_ev_empty.pack(anchor="w", pady=(0, 8), before=self.etree)
+
+    def _event_show_editor(self, on: bool) -> None:
+        if on:
+            self.ev_list.pack_forget()
+            self.ev_box.pack(fill="both", expand=True)
+        else:
+            self.ev_box.pack_forget()
+            self.ev_list.pack(fill="both", expand=True)
+
+    def _event_add(self) -> None:
+        if not self.sdraft:
+            self._sched_new()
+        if self.ev_draft is not None and not self._event_done():
+            return
+        last = max((e["time"] for e in self.sdraft["events"]), default="")
+        if last:
+            h, m = (int(x) for x in last.split(":"))
+            nxt = (datetime(2000, 1, 1, h, m) + timedelta(minutes=20)).strftime("%H:%M")
+        else:
+            nxt = "07:00"
+        self.ev_draft = new_event(nxt)
+        self._event_load_form("New event")
+        self.e_elabel.focus_set()
+
+    def _event_edit(self) -> None:
+        sel = self.etree.selection()
+        if not sel or not self.sdraft:
+            return
+        if self.ev_draft is not None and not self._event_done():
+            return
+        ev = next((e for e in self.sdraft["events"] if e["id"] == sel[0]), None)
+        if ev:
+            self.ev_draft = dict(ev)
+            self._event_load_form(f"Editing “{ev['label']}”")
+
+    def _event_load_form(self, title: str) -> None:
+        ev = self.ev_draft
+        h, m = ev["time"].split(":")
+        self.v_eh.set(h); self.v_em.set(m)
+        self.v_elabel.set(ev["label"])
+        self.v_eon.set(bool(ev["enabled"]))
+        self.l_ev_title.config(text=title)
+        self.l_err_event.config(text=""); self.l_ev_hint.config(text="")
+        self._event_sound_ui()
+        self._event_show_editor(True)
+
+    def _ev_recording(self) -> bool:
+        return self.recorder.recording and self._rec_owner == "event"
+
+    def _event_sound_ui(self) -> None:
+        """Show the right one of: chosen sound / recording in progress / a take waiting for a decision."""
+        for f in (self.ev_sound_row, self.ev_pick_row, self.ev_rec_row, self.ev_take_row):
+            f.pack_forget()
+        if self._ev_recording() and self.ev_draft is not None:
+            self.ev_rec_row.pack(fill="x")
+        elif self.ev_take:
+            self.ev_take_row.pack(fill="x")
+        else:
+            self.ev_sound_row.pack(fill="x")
+            self.ev_pick_row.pack(fill="x", pady=(8, 0))
+            path = resolve_sound(self.ev_draft.get("sound", "")) if self.ev_draft else ""
+            self.b_ev_preview.pack_forget(); self.b_ev_remove.pack_forget()
+            if not path:
+                self.l_ev_sound.config(text="No sound – the event is shown in Today but nothing plays", style="Card.TLabel")
+            elif not os.path.isfile(path):
+                self.l_ev_sound.config(text=f"{os.path.basename(path)} was not found – it may have been moved or deleted. Choose or record it again.", style="Bad.TLabel")
+                self.b_ev_remove.pack(side="left", padx=(12, 0))
+            else:
+                kind = "Your recording" if path.startswith(REC_DIR) else "Audio file"
+                self.l_ev_sound.config(text=f"{kind}:  {os.path.basename(path)}", style="Card.TLabel")
+                self.b_ev_preview.pack(side="left", padx=(12, 0))
+                self.b_ev_remove.pack(side="left", padx=8)
+        self.l_ev_hint.pack_forget(); self.l_ev_hint.pack(anchor="w", pady=(6, 0))
+
+    def _event_read_form(self) -> None:
+        self.ev_draft.update(time=f"{int(self.v_eh.get() or 0):02d}:{int(self.v_em.get() or 0):02d}" if (self.v_eh.get() or "").strip().isdigit() and (self.v_em.get() or "").strip().isdigit() else f"{self.v_eh.get()}:{self.v_em.get()}",
+                             label=self.v_elabel.get().strip(), enabled=bool(self.v_eon.get()))
+
+    def _event_done(self) -> bool:
+        if self.ev_draft is None:
+            return True
+        if self.recorder.recording:
+            self.l_ev_hint.config(text="Stop the recording first (or cancel it).")
+            return False
+        if self.ev_take:
+            self.l_ev_hint.config(text="Decide about the recording first: Use recording, Record again or Discard.")
+            return False
+        self._event_read_form()
+        errs = validate_schedule({"name": "x", "days": [0], "events": [self.ev_draft]})
+        msg = errs.get(f"event:{self.ev_draft['id']}", "")
+        self.l_err_event.config(text=msg)
+        if msg:
+            return False
+        evs = self.sdraft["events"]
+        for i, e in enumerate(evs):
+            if e["id"] == self.ev_draft["id"]:
+                evs[i] = self.ev_draft
+                break
+        else:
+            evs.append(self.ev_draft)
+        evs.sort(key=lambda e: e["time"])
+        eid = self.ev_draft["id"]
+        self.ev_draft = None
+        self._event_show_editor(False)
+        self._refresh_events()
+        self.etree.selection_set(eid)
+        return True
+
+    def _event_cancel(self) -> None:
+        if self._ev_recording():
+            self._ev_record_cancel()
+        self._ev_take_discard(silent=True)
+        self.ev_draft = None
+        self._event_show_editor(False)
+        self._refresh_events()
+
+    def _event_remove(self) -> None:
+        sel = self.etree.selection()
+        if sel and self.sdraft:
+            self.sdraft["events"] = [e for e in self.sdraft["events"] if e["id"] != sel[0]]
+            self._refresh_events()
+            self.l_sched_hint.config(text="Event removed from the list – press Save schedule to make it final, Cancel to get it back.")
+
+    def _event_choose_file(self) -> None:
+        p = filedialog.askopenfilename(
+            title="Choose the message to play",
+            initialdir=REC_DIR if os.path.isdir(REC_DIR) else os.path.expanduser("~"),
+            filetypes=[("Audio files", " ".join("*" + e for e in SUPPORTED_AUDIO)), ("All files", "*.*")])
+        if p and self.ev_draft is not None:
+            self.ev_draft["sound"] = portable_sound(p)
+            self._event_sound_ui()
+
+    def _event_preview(self) -> None:
+        if self.ev_draft is not None:
+            self._preview_sound(resolve_sound(self.ev_draft.get("sound", "")), int(self.v_svol.get()),
+                                self._get_output(self.v_sched_output), self.l_ev_hint)
+
+    def _event_remove_sound(self) -> None:
+        if self.ev_draft is not None:
+            self.ev_draft["sound"] = ""          # the file itself is never deleted here
+            self._event_sound_ui()
+
+    # ----- recording a message for an event
+    def _ev_record_start(self) -> None:
+        if self.recorder.recording:
+            self.l_ev_hint.config(text="A recording is already running in the Alarms view. Stop it there first.")
+            return
+        if self.ev_take:
+            self._ev_take_discard(silent=True)
+        dev = next((d[0] for d in self.devices if d[1] == self.v_mic.get()), None)
+        try:
+            self.recorder.start(dev, REC_DIR)
+        except Exception as e:
+            log(f"recording start failed: {e}")
+            messagebox.showerror(APP_NAME, "Could not start recording.\n\n"
+                                 f"{e}\n\nOn macOS make sure this app (or Terminal) is allowed to use the "
+                                 "microphone in System Settings → Privacy & Security → Microphone, then try again.")
+            return
+        self._rec_owner = "event"
+        self.l_ev_hint.config(text="Speak your message, then press Stop recording.")
+        self._event_sound_ui()
+        self._ev_meter()
+
+    def _ev_meter(self) -> None:
+        if not self._ev_recording() or self.ev_draft is None:
+            return
+        self.ev_meter["value"] = min(100, self.recorder.level * 140)
+        secs = int(self.recorder.elapsed)
+        if secs > 2 and self.recorder.peak < 0.02:
+            self.l_ev_rec.config(text=f"●  Recording…  {secs} s   very quiet – is this the right microphone?")
+        else:
+            self.l_ev_rec.config(text=f"●  Recording…  {secs} s   (level {self.recorder.peak*100:.0f}%)")
+        self.after(80, self._ev_meter)
+
+    def _ev_record_stop(self) -> None:
+        if not self._ev_recording():
+            return
+        secs = int(self.recorder.elapsed)
+        try:
+            path = self.recorder.stop()
+        except Exception as e:
+            log(f"recording save failed: {e}")
+            messagebox.showerror(APP_NAME, "Could not save the recording.\n\nThe microphone may have disconnected, or the "
+                                 "recordings folder is not writable. Check the microphone and try again.\n\n"
+                                 f"Details: {e}")
+            self._event_sound_ui()
+            return
+        self.ev_take = path
+        peak, gain = self.recorder.last_peak, self.recorder.last_gain_db
+        if peak < QUIET_PEAK:
+            self.l_ev_take.config(text=f"Recorded {secs} s – but almost nothing was heard. Check the microphone (“{self.v_mic.get()[:30]}”), then Record again.",
+                                  style="Bad.TLabel")
+        elif gain >= 6:
+            self.l_ev_take.config(text=f"Recorded {secs} s – it was quiet, so it was boosted {gain:+.0f} dB.", style="Warn.TLabel")
+        else:
+            self.l_ev_take.config(text=f"Recorded {secs} s.", style="Card.TLabel")
+        self.l_ev_hint.config(text="Listen with Preview, then press Use recording.")
+        self._event_sound_ui()
+
+    def _ev_record_cancel(self) -> None:
+        if self._ev_recording():
+            try:
+                path = self.recorder.stop()
+                self._delete_take(path)
+            except Exception as e:
+                log(f"recording cancel: {e}")
+        self.l_ev_hint.config(text="Recording cancelled – the previous sound is unchanged.")
+        if self.ev_draft is not None:
+            self._event_sound_ui()
+
+    def _ev_record_again(self) -> None:
+        self._ev_take_discard(silent=True)
+        self._ev_record_start()
+
+    def _ev_take_use(self) -> None:
+        if self.ev_take and self.ev_draft is not None:
+            self.ev_draft["sound"] = portable_sound(self.ev_take)
+            self.ev_take = ""
+            self.l_ev_hint.config(text="Recording attached. Press Done, then Save schedule.")
+            self._event_sound_ui()
+
+    def _ev_take_discard(self, silent: bool = False) -> None:
+        if self.ev_take:
+            self._delete_take(self.ev_take)
+            self.ev_take = ""
+            if not silent:
+                self.l_ev_hint.config(text="Recording discarded – the previous sound is unchanged.")
+        if self.ev_draft is not None:
+            self._event_sound_ui()
+
+    def _delete_take(self, path: str) -> None:
+        """Remove a recording we made but nobody uses.  Never touches files outside recordings/ or files in use."""
+        try:
+            drafts = list((self.sdraft or {}).get("events", [])) + ([self.ev_draft] if self.ev_draft else [])
+            if path and path.startswith(REC_DIR) and os.path.isfile(path) and self.store.sound_users(path) == 0 and \
+                    not any(resolve_sound(e.get("sound", "")) == path for e in drafts):
+                os.remove(path)
+                log(f"unused recording removed: {os.path.basename(path)}")
+        except OSError as e:
+            log(f"could not remove recording {path}: {e}")
+
+    # ================================================================== preview (never touches the schedule)
+    def _preview_sound(self, path: str, volume: int, output: str, hint, what: str = "sound") -> None:
+        if not path or not os.path.isfile(path):
+            hint.config(text="There is no sound file to play – record a message or choose a file first.")
+            return
+        if self.ring_windows or self.current_ann or self.recorder.recording:
+            hint.config(text="Something is playing or recording right now. Stop it first, then preview.")
+            return
+        if self._is_airplay(output):
+            self._play_airplay(None, path, volume, output[len(AirPlayPlayer.PREFIX):], loop=False, fade=0, hint=hint)
+            return
+        try:
+            warning = self.player.play(path, volume, loop=False, device=output)
+            hint.config(text=warning or f"Playing the {what} on {output or 'the system default output'} at {volume} %.")
+        except Exception as e:
+            log(f"preview failed for {path}: {e}")
+            messagebox.showerror(APP_NAME, f"Could not play {os.path.basename(path)}.\n\n"
+                                 "The file may be damaged or in a format this app cannot decode. "
+                                 "Try another file, or convert this one to MP3/WAV.\n\n"
+                                 f"Details: {e}")
+
+    # ================================================================== routine messages (announcements)
+    def _pump_announcements(self) -> None:
+        """Play the next queued message if the single audio stream is free.  Alarms always win."""
+        if self.current_ann or not len(self.announcements):
+            return
+        if self.ring_windows or self._local_owner:
+            self.after(1000, self._pump_announcements)      # an alarm is ringing/playing: wait
+            return
+        occ = self.announcements.pop_playable(datetime.now(), self.store)
+        if not occ:
+            self._refresh_today()
+            return
+        sc, ev, path = occ["schedule"], occ["event"], occ["path"]
+        out = sc.get("output", "")
+        occ["via"] = "airplay" if self._is_airplay(out) else "local"
+        occ["note"] = ""
+        self.current_ann = occ
+        self.store.record(occ["key"], "playing")
+        log(f"routine message playing: '{ev['label']}' ({sc['name']}) on {out or 'system default'}")
+        if occ["via"] == "airplay":
+            pseudo = {"id": "ann:" + occ["key"], "label": ev["label"], "sound": path, "volume": sc["volume"], "output": out}
+            self._play_airplay(pseudo, path, int(sc["volume"]), out[len(AirPlayPlayer.PREFIX):], loop=False, fade=0, hint=self.l_today_hint)
+        else:
+            try:
+                warning = self.player.play(path, int(sc["volume"]), loop=False, device=out)
+                if warning:
+                    occ["note"] = "played on the system default output – the chosen speaker was not connected"
+                    log(f"routine message '{ev['label']}': {warning}")
+                self._ann_job = self.after(500, self._watch_announcement)
+            except Exception as e:
+                log(f"routine message '{ev['label']}' failed: {e}")
+                self.current_ann = None
+                self.store.record(occ["key"], "failed", "the file could not be played")
+                self.after(200, self._pump_announcements)
+        self._apply_power(); self._tick_indicators(); self._refresh_today()
+
+    def _watch_announcement(self) -> None:
+        occ = self.current_ann
+        if not occ or occ.get("via") != "local":
+            return
+        if self.player.is_playing():
+            self._ann_job = self.after(500, self._watch_announcement)
+        else:
+            self._finish_announcement("played")
+
+    def _finish_announcement(self, status: str, note: str = "", stop_audio: bool = True) -> None:
+        occ = self.current_ann
+        if not occ:
+            return
+        self.current_ann = None
+        if self._ann_job:
+            self.after_cancel(self._ann_job)
+            self._ann_job = None
+        if stop_audio:
+            if occ.get("via") == "airplay":
+                self._stop_airplay()
+            elif self._local_owner is None:
+                self.player.stop()
+        self.store.record(occ["key"], status, note or occ.get("note", ""))
+        log(f"routine message '{occ['event']['label']}' {status}" + (f" ({note})" if note else ""))
+        self._apply_power(); self._tick_indicators(); self._refresh_today()
+        self.after(300, self._pump_announcements)
+
+    def _stop_announcement(self) -> None:
+        if self.current_ann:
+            self._finish_announcement("stopped", "stopped by you")
+
+    def _announcement_airplay_failed(self, pseudo: dict, why: str) -> None:
+        occ = self.current_ann
+        if not occ or pseudo["id"] != "ann:" + occ["key"]:
+            return
+        if self._local_owner or self.ring_windows:        # an alarm is using the speakers: the alarm wins
+            self._finish_announcement("interrupted", "an alarm rang during this message", stop_audio=False)
+            return
+        log(f"routine message '{occ['event']['label']}': AirPlay failed ({why}); playing on this computer")
+        try:
+            self.player.play(occ["path"], int(occ["schedule"]["volume"]), loop=False, device="")
+            occ["via"] = "local"
+            occ["note"] = "AirPlay speaker unavailable – played on this computer"
+            self._ann_job = self.after(500, self._watch_announcement)
+            self._refresh_today()
+        except Exception as e:
+            log(f"routine message fallback failed: {e}")
+            self._finish_announcement("failed", "the speaker was unavailable and the file could not be played here", stop_audio=False)
+
+    def _cancel_announcements(self, sid: str | None, eid: str | None, why: str, keep_playing: bool = False) -> None:
+        """Drop queued messages of a schedule/event and, unless keep_playing, stop one that is playing."""
+        for occ in self.announcements.cancel(sid, eid):
+            self.store.record(occ["key"], "skipped", why)
+            log(f"routine message '{occ['event']['label']}' cancelled: {why}")
+        cur = self.current_ann
+        if cur and not keep_playing and cur["schedule"]["id"] == sid and (eid is None or cur["event"]["id"] == eid):
+            self._finish_announcement("stopped", why)
+
     def _on_close(self) -> None:
-        if self.ring_windows:
-            msg = ("A file is still playing. Quitting will stop it." if self.once_play and len(self.ring_windows) == len(self.once_play)
+        if self.sdraft and not self._sched_confirm_discard():
+            return
+        if self.ring_windows or self.current_ann:
+            msg = ("A message is playing right now. Quitting will stop it." if self.current_ann and not self.ring_windows
+                   else "A file is still playing. Quitting will stop it." if self.once_play and len(self.ring_windows) == len(self.once_play)
                    else "An alarm is ringing right now. Quitting will silence it.")
             if not messagebox.askyesno(APP_NAME, msg + "\n\nQuit anyway?"):
                 return
         elif self.scheduler.next_event():
-            if not messagebox.askyesno(APP_NAME, "An alarm is still armed. Alarms only ring while this window "
-                                                 "is open.\n\nQuit anyway?"):
+            if not messagebox.askyesno(APP_NAME, "An alarm or schedule is still set. Alarms and messages only play while "
+                                                 "this window is open.\n\nQuit anyway?"):
                 return
+        if self.current_ann:
+            self._finish_announcement("stopped", "the app was closed")
+        for occ in self.announcements.cancel():
+            self.store.record(occ["key"], "missed", "the app was closed before it played")
         self.scheduler.stop()
         self.player.stop()
         if self.airplay and self.airplay.playing:

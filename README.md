@@ -1,7 +1,7 @@
 ![visitors](https://visitor-badge.laobi.icu/badge?page_id=mp3-alarm.visitor-badge)
 # ⏰ MP3 Alarm Clock
 
-**A tiny desktop alarm clock that plays an MP3 — or your own recorded voice — at a scheduled time, keeps your computer awake, and wakes it from sleep when the alarm is due.**
+**A tiny desktop alarm clock that plays an MP3 — or your own recorded voice — at a scheduled time, keeps your computer awake, and wakes it from sleep when the alarm is due. Plus family schedules: “Son — School day” with a recorded “Breakfast is ready” at 07:20 on weekdays, on the speaker in his room.**
 
 Single Python file · macOS / Windows / Linux · starts with a double-click · the whole folder is portable.
 
@@ -13,7 +13,15 @@ Single Python file · macOS / Windows / Linux · starts with a double-click · t
 
 ## Screenshots
 
-**The main window.** Big clock and next-alarm countdown in the header, plain-language status pills, your alarms on the left, one alarm in three steps on the right.
+**Today.** Everything that happens today, from every family schedule and every alarm, in one list with a plain status per row.
+
+![Today view: the day's messages and alarms in time order with their status](docs/screenshots/today.png)
+
+**Schedules.** One named schedule per person or routine: repeat days, one speaker, one volume, and a list of timed events, each with its own recorded message.
+
+![Schedules view: the list of schedules and the editor for one of them](docs/screenshots/schedules.png)
+
+**The classic alarm editor.** Big clock and next-alarm countdown in the header, plain-language status pills, your alarms on the left, one alarm in three steps on the right.
 
 ![Main window: alarm list on the left, the editor with steps When / Sound / Where on the right](docs/screenshots/main.png)
 
@@ -29,6 +37,7 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 
 | | |
 |---|---|
+| 👨‍👩‍👧 **Family schedules** | Named schedules (“Son — School day”, “Family — Evening”) with **timed events**, each with its own **recorded message** or audio file. Repeat days, one speaker and one volume per schedule. **Today** shows the whole day; **Skip today** pauses one event or a whole schedule for today only |
 | 🎵 **Any sound** | MP3, WAV, OGG, FLAC, AIFF (and M4A where the system can decode it) — pick a file, or **record from the microphone** and use the recording as the alarm. Quiet mics are **auto-boosted** to a healthy level, and the app warns while recording if the chosen mic is picking up nothing |
 | 📅 **Real scheduling** | Date + time (24 h), repeat **once / every day / weekdays**, unlimited alarms |
 | ▶ **Long recordings** | Each alarm either **rings until you stop it** (looping, with a give-up timeout) or **plays the whole file once** — a two-hour talk or a full album starts on time, keeps the computer awake while it plays, and stops by itself at the end |
@@ -48,18 +57,20 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 
 1. [Install and start](#1-install-and-start)
 2. [The window at a glance](#2-the-window-at-a-glance)
-3. [Set an alarm in three steps](#3-set-an-alarm-in-three-steps)
-4. [Record your own voice](#4-record-your-own-voice)
-5. [Play a whole file once (talks, albums)](#5-play-a-whole-file-once-talks-albums)
-6. [When the alarm rings](#6-when-the-alarm-rings)
-7. [Manage your alarms](#7-manage-your-alarms)
-8. [More options](#8-more-options)
-9. [What the status pills mean](#9-what-the-status-pills-mean)
-10. [Sleep, wake-up and missed alarms](#10-sleep-wake-up-and-missed-alarms)
-11. [AirPlay speakers (macOS)](#11-airplay-speakers-macos)
-12. [Where your data lives](#12-where-your-data-lives)
-13. [Troubleshooting](#13-troubleshooting)
-14. [Questions people ask](#14-questions-people-ask)
+3. [Today: what happens today](#3-today-what-happens-today)
+4. [Schedules: messages for the family](#4-schedules-messages-for-the-family)
+5. [Set an alarm in three steps](#5-set-an-alarm-in-three-steps)
+6. [Record your own voice](#6-record-your-own-voice)
+7. [Play a whole file once (talks, albums)](#7-play-a-whole-file-once-talks-albums)
+8. [When the alarm rings](#8-when-the-alarm-rings)
+9. [Manage your alarms](#9-manage-your-alarms)
+10. [More options](#10-more-options)
+11. [What the status pills mean](#11-what-the-status-pills-mean)
+12. [Sleep, wake-up and missed alarms](#12-sleep-wake-up-and-missed-alarms)
+13. [AirPlay speakers (macOS)](#13-airplay-speakers-macos)
+14. [Where your data lives](#14-where-your-data-lives)
+15. [Troubleshooting](#15-troubleshooting)
+16. [Questions people ask](#16-questions-people-ask)
 
 ## 1. Install and start
 
@@ -96,7 +107,7 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 ![First launch: an empty alarm list and a ready-to-save new alarm](docs/screenshots/first-launch.png)
 
-The list is empty and the editor on the right already holds a usable new alarm: **today, at the next round hour, just once**. The three grey pills in the header say *No alarm set · Not keeping the computer awake · No wake-up scheduled*. Nothing happens until you save an alarm.
+The app opens on **Today**, which is empty, with one button: **Create your first schedule**. The three grey pills in the header say *No alarm set · Not keeping the computer awake · No wake-up scheduled*. Nothing happens until you save a schedule or an alarm. If you only want a classic alarm, click **Alarms** in the row under the header.
 
 ## 2. The window at a glance
 
@@ -104,16 +115,102 @@ The list is empty and the editor on the right already holds a usable new alarm: 
 
 | Area | What it shows |
 |---|---|
-| **Header, left** | The name of the next alarm, when it rings and a live countdown. Below it, three **status pills** that always tell the truth about *right now*: is an alarm set, will the computer stay awake, will it wake from sleep (see [section 9](#9-what-the-status-pills-mean)). |
+| **Header, left** | The name of the next alarm, when it rings and a live countdown. Below it, three **status pills** that always tell the truth about *right now*: is an alarm set, will the computer stay awake, will it wake from sleep (see [section 11](#11-what-the-status-pills-mean)). |
 | **Header, right** | A big clock with the date and seconds, so you can check the computer's time is right. |
-| **Your alarms** (left card) | Every alarm with its time, name, repeat rule, **next ring** time, sound file and output device. A filled dot ● means on, a hollow dot ○ means off. Below the list: *Turn on / off*, *Delete* and *Ring it now (test)*. |
-| **More options** (under the list) | Collapsed by default. Sleep and wake settings, system volume, snooze length and fade-in (see [section 8](#8-more-options)). |
-| **Editor** (right card) | One alarm at a time, in three numbered steps: ① When ② Sound ③ Where, then **Save alarm**. |
+| **Today · Schedules · Alarms** | The three views, in the row under the header. **Today** is the day's plan, **Schedules** is where family routines are made, **Alarms** is the classic alarm editor described in sections 5 to 10. |
+| **Your alarms** (left card, Alarms view) | Every alarm with its time, name, repeat rule, **next ring** time, sound file and output device. A filled dot ● means on, a hollow dot ○ means off. Below the list: *Turn on / off*, *Delete* and *Ring it now (test)*. |
+| **More options** (under the list) | Collapsed by default. Sleep and wake settings, system volume, snooze length and fade-in (see [section 10](#10-more-options)). |
+| **Editor** (right card, Alarms view) | One alarm at a time, in three numbered steps: ① When ② Sound ③ Where, then **Save alarm**. |
 | **Footer** | Where your alarms and recordings are stored. |
 
 The window can be resized; the alarm list grows and shrinks, the editor keeps its width.
 
-## 3. Set an alarm in three steps
+## 3. Today: what happens today
+
+![Today: upcoming rows first, earlier rows greyed below](docs/screenshots/today.png)
+
+**Today** opens by default. It lists every event of every schedule that runs today, plus the individual alarms that ring today, in time order. Above the list: the date, and the next thing that will actually make a sound, with a countdown.
+
+| Column | Meaning |
+|---|---|
+| **Time** | 24-hour wall-clock time. |
+| **Activity** | The event's name ("Breakfast"), or the alarm's name. |
+| **Schedule** | Which schedule it belongs to, or *Alarm* for an individual alarm. |
+| **Sound** | *🎤 Recording* for a message you recorded, the file name for an audio file, *No sound* or *Missing file*. |
+| **Speaker** | Where it plays. |
+| **Status** | See below. |
+
+**Statuses:** *Upcoming* (will play), *Playing soon* (due, waiting for another sound to finish), *Playing*, *Played*, *Missed* (the computer was off or asleep, or the message would have been more than two minutes late), *Failed* (file missing or unplayable), *Skipped*, *Stopped*, *Interrupted* (an alarm rang over it), *No sound* (shown in the plan, nothing plays), *Off* (event switched off). Playing a message is only a reminder: it never marks the activity as done.
+
+- **Show** filters the list to one schedule.
+- Rows whose time has passed are hidden behind **▸ Earlier today (n)**; click it to see them.
+- Select a row for **Skip today** (or **Undo skip**) and **▶ Preview sound**. Right-click (or Control-click) a row for the same actions plus **Stop message**.
+- **Skip today** is a one-day exception: tomorrow the normal pattern resumes by itself. Skipping an individual alarm is done in the Alarms view instead (Turn on / off).
+- While a message plays, a **■ Stop message** button appears at the top of the list.
+
+**How messages play.** A message plays once, from start to end, at the schedule's volume on the schedule's speaker, with no fade-in (so the first words are not lost). If two messages fall on the same minute they play one after the other, in a fixed order (earlier time first, then schedule name). A message that would start more than **two minutes** late is marked *Missed* instead of playing late, so nobody gets a burst of stale reminders after the computer wakes up. Individual alarms always win: if an alarm rings while a message plays, the message stops and is marked *Interrupted*; it is not replayed.
+
+## 4. Schedules: messages for the family
+
+A **schedule** is a named list of timed events that share the same repeat days, speaker and volume — one per person or routine, for example:
+
+| Schedule | Days | Speaker | Events |
+|---|---|---|---|
+| Son — School day | Monday–Friday | Son's bedroom speaker | Wake up 07:00 · Breakfast 07:20 · Leave for school 07:50 · Homework 17:00 |
+| Daughter — School day | Monday–Friday | Daughter's bedroom speaker | Wake up 07:10 · Breakfast 07:30 · Leave for school 08:00 |
+| Family — Evening | Every day | Living room speaker | Dinner 18:30 · Prepare for tomorrow 20:00 · Wind down 20:30 |
+
+<p align="center"><img src="docs/screenshots/schedules.png" alt="Schedules: list on the left, the editor for one schedule on the right"></p>
+
+### Create a schedule
+
+1. Click **Schedules**, then **＋ Create schedule**.
+2. **Name** it ("Son — School day"). Names are just labels; nobody needs an account.
+3. **Repeats:** click the day buttons, or use **Weekdays**, **Every day**, **Weekends**.
+4. **Speaker:** the output for every event in this schedule (built-in, a named speaker, HDMI, or on a Mac an AirPlay speaker). **🔈 Test speaker** plays a short chime there at the chosen **Volume**.
+5. Tick **Schedule is on** (top right of the editor). A new schedule stays off until you save it as on.
+6. **Add event** (below), then **Save schedule**. A green **✓ Saved** confirms it.
+
+The list on the left shows each schedule with its days, speaker and number of events. A filled dot ● means on. Below the list: **Turn on / off** (one switch for the whole schedule; double-clicking the row does the same), **Duplicate** (a full copy with fresh IDs, switched off, sharing the same recordings), **Skip today** / **Undo skip** for the whole schedule, and **⋯ → Delete schedule…** (removes the schedule and its events; recordings and audio files are never deleted).
+
+### Add an event
+
+<p align="center"><img src="docs/screenshots/event-editor.png" width="640" alt="The event editor inside the schedule: time, activity, message"></p>
+
+Press **＋ Add event**. The event editor replaces the event list:
+
+- **Time** and **Activity** ("Breakfast"). **On** lets you pause one event without deleting it.
+- **Message:** three choices — **🎤 Record my voice**, **Choose audio file…**, or leave it with *No sound* (the event still appears in Today, nothing plays). After choosing, the friendly name is shown with **▶ Preview** and **Remove sound**; recording or choosing again replaces it.
+- **Done** puts the event in the list. **Cancel** leaves the previously saved event and its sound exactly as they were.
+- Events are validated as you go: an empty name or an impossible time shows a short note next to the field, and the schedule cannot be saved with an empty name or no repeat day.
+
+The event list shows time, activity, sound and on/off. Select one and press **Edit event** (or double-click) or **Remove event**. Nothing is stored until **Save schedule**; **Cancel** next to it throws the unsaved changes away, and switching to another schedule or view with unsaved changes asks first.
+
+### Record a message for an event
+
+<p align="center"><img src="docs/screenshots/event-recording.png" width="640" alt="Recording in progress: red recording indicator, elapsed seconds, level meter, Stop recording and Cancel"></p>
+
+1. In the event editor press **🎤 Record my voice** (pick the microphone next to it first if you have several). Recording starts only when you press the button.
+2. The row turns into a red **● Recording… N s (level x%)** with a live level meter. If nothing is picked up for two seconds it says *very quiet – is this the right microphone?* so you can fix it before talking for a minute.
+3. Press **■ Stop recording** (or **Cancel** to throw the take away and keep the old sound).
+
+<p align="center"><img src="docs/screenshots/event-take.png" width="640" alt="After stopping: Recorded N s, with Preview, Record again, Use recording and Discard"></p>
+
+4. Listen with **▶ Preview**, then **Use recording** (or **Record again** / **Discard**). A take you do not use is deleted again; the previously attached sound is untouched until you press Use recording, Done and Save schedule.
+
+Recordings go to the `recordings` folder next to the app and are stored with a portable path, so the whole folder can be copied to another computer. Quiet takes are boosted automatically, and a silent take is reported in plain words with the microphone name (see [section 6](#6-record-your-own-voice) for microphone permission on macOS).
+
+### Day to day
+
+- **Skip today** on a schedule or on one event in Today is a temporary exception. **Undo skip** cancels it. Tomorrow needs no maintenance.
+- Turning a schedule off, skipping it or deleting it also cancels its messages that were waiting to play; other schedules and alarms are not affected.
+- The header pills cover schedules too: *Message set · plays in 1h 28m*, *Computer will stay awake*, *Will wake from sleep at 18:29*. Events with no sound, switched-off events and skipped days never keep the computer awake or register a wake-up.
+- If a schedule's speaker is unplugged when a message is due, the message plays on the system default output and the status notes it.
+- One message plays at a time on this computer. Multi-room playback of different messages at the same moment is not supported in this version.
+- **macOS and the password prompt.** With *Wake my computer from sleep* on, macOS asks for your password each time the *next* audible event changes — with three morning messages that is three prompts a morning. If the computer stays on anyway (the *Keep my computer awake* guard is on by default), you can turn *Wake my computer from sleep* off in More options and the messages still play; keep it on only if you really put the Mac to sleep between events.
+- While a message plays, a **■ Stop message** button appears in the header, so it can be silenced from any view; the Esc key stops it too.
+
+## 5. Set an alarm in three steps
 
 Press **＋ New alarm** (or just use the form that is already there), fill in the three steps, press **Save alarm**. You can save immediately without changing anything: the defaults are today, the next round hour, and the sound and volume of the last alarm you saved.
 
@@ -131,12 +228,12 @@ Press **＋ New alarm** (or just use the form that is already there), fill in th
 - **Try it quickly:** **In 1 min** and **In 10 min** set the date and time relative to now. Use them to hear an alarm for real, exactly as it will ring (fade-in, system volume, chosen speaker).
 - **At that time:** what should happen when the moment comes.
   - **Ring until I stop it** — the usual alarm. The sound loops until you press STOP or Snooze. *If nobody stops it, give up after N minutes* (1–120, default 10) so a forgotten alarm does not play all day.
-  - **Play the whole file once** — for long recordings; see [section 5](#5-play-a-whole-file-once-talks-albums).
+  - **Play the whole file once** — for long recordings; see [section 7](#7-play-a-whole-file-once-talks-albums).
 
 ### ② Sound
 
 - **Choose a file…** opens a normal file dialog. Supported: MP3, WAV, OGG, FLAC, AIFF (M4A if your system can decode it). The file name and its folder appear above the buttons. If the file is later moved or deleted the label says *file not found* and the alarm will show an error when it is due, so keep alarm sounds in a fixed place (the `recordings` folder next to the app is a good one).
-- **🎤 Record my voice** records a message from the microphone; see [section 4](#4-record-your-own-voice).
+- **🎤 Record my voice** records a message from the microphone; see [section 6](#6-record-your-own-voice).
 - **▶ Preview** plays the chosen sound once, at the slider volume, on the speaker chosen in step ③ — with no fade-in, so you hear the real level. **■ Stop** stops it.
 - **Microphone** — which input to record from; **↻** refreshes the list after plugging one in. The bar to the right is the level meter that moves while you record.
 - **Volume** — the alarm's own volume, 0–100 %. It is applied on top of the system volume (see *More options* for forcing the system volume up as well).
@@ -147,14 +244,14 @@ Press **＋ New alarm** (or just use the form that is already there), fill in th
 
 - **System default output** follows whatever the computer is using at that moment (the safe choice).
 - Every connected output is listed by name: built-in speakers, a headset, HDMI, USB speakers, a Bluetooth box. **↻** refreshes the list.
-- On a Mac, **AirPlay speakers** such as HomePods are listed too; see [section 11](#11-airplay-speakers-macos).
+- On a Mac, **AirPlay speakers** such as HomePods are listed too; see [section 13](#13-airplay-speakers-macos).
 - If the chosen device is unplugged when the alarm is due, the alarm rings on the system default instead and the editor says so. In the editor, such a device is shown as *(not connected)* until you plug it back in.
 
 ### Save
 
 Press **Save alarm** (it reads **Save changes** when you are editing an existing alarm). The alarm appears in the list, the header shows the countdown and the pills turn green. **Cancel** throws away unsaved edits and returns to a fresh new alarm.
 
-## 4. Record your own voice
+## 6. Record your own voice
 
 1. Pick the microphone in step ② (usually *System default microphone*).
 2. Press **🎤 Record my voice**. The button turns into **■ Stop**, the level meter starts moving and the line below counts the seconds and shows the peak level.
@@ -175,7 +272,7 @@ While recording, if nothing is coming in for two seconds the line turns red: *ve
 
 **Microphone permission on macOS.** The first recording makes macOS ask whether the app may use the microphone. The question is addressed to the program that started the alarm clock: *Terminal* when you use `Start Alarm Clock.command`, or *Alarm Clock* itself when built standalone. If you clicked *Don't Allow*, or a recording comes out silent, open *System Settings → Privacy & Security → Microphone* and switch it on.
 
-## 5. Play a whole file once (talks, albums)
+## 7. Play a whole file once (talks, albums)
 
 Some things are not meant to loop: a two-hour talk, a sermon, a guided meditation, an album to fall asleep to. For those, in step ① choose **Play the whole file once**.
 
@@ -188,7 +285,7 @@ Some things are not meant to loop: a two-hour talk, a sermon, a guided meditatio
 
 <p align="center"><img src="docs/screenshots/now-playing.png" width="520" alt="The Now playing card with elapsed time and a STOP button"></p>
 
-## 6. When the alarm rings
+## 8. When the alarm rings
 
 <p align="center"><img src="docs/screenshots/main-ringing.png" alt="Main window while ringing: red Ringing now pill and a full-width STOP ALARM bar"></p>
 
@@ -212,7 +309,7 @@ The snooze is temporary; it is not saved as a new alarm and it does not change t
 
 **One-time alarms** switch themselves off after ringing (the dot in the list turns hollow and *Next ring* shows *Off*). Repeating alarms stay on.
 
-## 7. Manage your alarms
+## 9. Manage your alarms
 
 The list on the left shows every alarm, sorted so the next one to ring is at the top; switched-off alarms sit at the bottom in grey.
 
@@ -227,7 +324,7 @@ The list on the left shows every alarm, sorted so the next one to ring is at the
 
 The *Next ring* column, the header countdown and the *Alarm set* pill always agree; they are all computed from the same schedule.
 
-## 8. More options
+## 10. More options
 
 Press **▸ More options (sleep, snooze, fade-in)** under the alarm list to open this panel. Changes are saved immediately; there is no OK button.
 
@@ -236,23 +333,25 @@ Press **▸ More options (sleep, snooze, fade-in)** under the alarm list to open
 | Setting | Default | What it does |
 |---|---|---|
 | **Keep my computer awake while an alarm is set** | on | Stops the computer from going to sleep on its own while any alarm is armed or a file is playing. Needs no password. The screen may still dim or lock; that is fine, the alarm rings anyway. |
-| **Wake my computer from sleep for alarms** | on | If you (or the lid) put the computer to sleep anyway, the app asks the operating system to wake it **one minute before** the next alarm. On macOS this needs your password once each time the next alarm changes; see [section 10](#10-sleep-wake-up-and-missed-alarms). |
+| **Wake my computer from sleep for alarms** | on | If you (or the lid) put the computer to sleep anyway, the app asks the operating system to wake it **one minute before** the next alarm. On macOS this needs your password once each time the next alarm changes; see [section 12](#12-sleep-wake-up-and-missed-alarms). |
 | **Turn the system volume up to N % when an alarm rings** | on (macOS), off elsewhere | Sets the computer's master volume to N (Windows: raises it) and un-mutes it just before ringing, so an alarm cannot be silenced by a volume knob you forgot about. Not used for AirPlay speakers (they have their own volume). |
 | **Snooze for N minutes** | 5 | Length of one snooze. 1–60. |
 | **Fade the sound in over N seconds** | 20 | Ramp from silent to the alarm volume. 0 turns fading off (instant full volume). 0–120. Preview never fades. |
 
-## 9. What the status pills mean
+## 11. What the status pills mean
 
 The three pills in the header describe the situation *right now*. Green ● is good, orange △ is a warning, red is a problem, grey ○ is "nothing to do".
 
 | Pill | Meaning |
 |---|---|
 | **● Alarm set · rings in 7h 2m** | At least one alarm is on; the countdown is to the next one (including a snooze). |
+| **● Message set · plays in 1h 28m** | The next audible thing is a schedule message. |
+| **▶ Playing a message** | A schedule message is playing right now. |
 | **○ No alarm set** | Nothing will ring. |
 | **🔔 Ringing now** / **▶ Playing now** | An alarm is ringing, or a whole-file alarm is playing. |
 | **● Computer will stay awake** | The keep-awake guard is active. |
 | **△ Computer may fall asleep (option is off)** | An alarm is set but *Keep my computer awake* is switched off. If the computer sleeps, the alarm only rings if a wake-up is registered. |
-| **△ Computer may fall asleep while playing (option is off)** | A whole-file alarm ([section 5](#5-play-a-whole-file-once-talks-albums)) is playing but *Keep my computer awake* is off, so idle sleep could cut it short. |
+| **△ Computer may fall asleep while playing (option is off)** | A whole-file alarm ([section 7](#7-play-a-whole-file-once-talks-albums)) is playing but *Keep my computer awake* is off, so idle sleep could cut it short. |
 | **△ Could not keep the computer awake** | The guard failed (details in `alarmclock.log`). |
 | **○ Not keeping the computer awake** | No alarm is set, so nothing to guard. |
 | **● Will wake from sleep at 06:29** | The operating system has accepted the wake request (one minute before the alarm). |
@@ -266,7 +365,7 @@ The three pills in the header describe the situation *right now*. Green ● is g
 
 ![Header when the password prompt was declined: orange pill and a Try again button](docs/screenshots/header-wake-declined.png)
 
-## 10. Sleep, wake-up and missed alarms
+## 12. Sleep, wake-up and missed alarms
 
 **The app must be running.** Alarms ring only while the window is open (it can be behind other windows or on another desktop). Closing it with an alarm armed asks *Quit anyway?* first.
 
@@ -285,7 +384,7 @@ The three pills in the header describe the situation *right now*. Green ● is g
 
 **Check the clock.** The header shows the computer's time and seconds; an alarm can only be as accurate as that.
 
-## 11. AirPlay speakers (macOS)
+## 13. AirPlay speakers (macOS)
 
 In step ③ open the list and choose an **AirPlay: …** entry, or **AirPlay speakers… (select to load them from Music)** if none are listed yet (or press ↻). The app asks the Music app for the AirPlay devices it can see and lists them as `AirPlay: Living Room (HomePod)`. Pick one and save the alarm.
 
@@ -297,20 +396,23 @@ At ring time the app launches Music (it pre-launches it 3 minutes early), routes
 - **Preview** also plays through the AirPlay speaker, so you can test the whole chain.
 - Windows / Linux: AirPlay entries are simply not offered.
 
-## 12. Where your data lives
+## 14. Where your data lives
 
 Everything is stored **next to the app**, never in your home folder:
 
 | File | Contents |
 |---|---|
-| `alarms.json` | Your alarms and the settings from More options. Plain text; you can back it up or copy it to another machine. |
+| `alarms.json` | Your alarms, schedules, today's skips, the last week of message history and the settings from More options. Plain text (schema version 2); you can back it up or copy it to another machine. |
+| `alarms.json.backup-v1` | Created once when a file from the previous version is upgraded — your alarms before schedules existed. |
 | `recordings/` | Voice recordings (`voice_2026-09-24_06-15-02.wav`). Also the default folder in *Choose a file…*. |
 | `alarmclock.log` | What happened and when: alarms due, snoozes, missed alarms, wake requests, errors. Look here first when something is unclear. |
 | `.venv/` | The private Python environment the launcher created. Safe to delete; it is rebuilt on the next start. |
 
+If the file cannot be read (for example after a bad manual edit), the app starts empty, keeps the original as `alarms.json.broken-<date>` and tells you so; it never overwrites it.
+
 **Moving to another computer:** copy the whole folder. Alarms whose sound files live *inside* the folder (recordings) keep working; alarms pointing to files elsewhere on the old machine will say *file not found* until you choose the file again.
 
-## 13. Troubleshooting
+## 15. Troubleshooting
 
 | Problem | What to do |
 |---|---|
@@ -327,10 +429,12 @@ Everything is stored **next to the app**, never in your home folder:
 | **"The sound file for … is missing"** | The file was moved or deleted. Click the alarm, *Choose a file…* again, save. |
 | **"… could not play <file>"** (when ringing) or **"Could not play <file>"** (Preview) | The file is damaged or in a format the player cannot decode. Convert it to MP3 or WAV. |
 | **AirPlay speaker not listed** | Make sure it is on and on the same Wi-Fi, then press ↻ next to the list. The Music app must be allowed to be controlled (*Privacy & Security → Automation*). |
-| **The password dialog keeps coming back** | It appears once per change of the next alarm time. Editing several alarms in a row triggers it each time; finish editing first, or turn *Wake my computer from sleep* off while you set things up. |
+| **The password dialog keeps coming back** | It appears once per change of the next alarm or message time. Editing several alarms in a row, or a schedule with many messages, triggers it each time; finish editing first, or turn *Wake my computer from sleep* off (the keep-awake guard still works without it). |
+| **A message shows *Missed* although the computer was on** | Its schedule was saved or turned on after the time had passed today (the note says so), or another sound kept it waiting for more than two minutes. Tomorrow it plays normally. |
+| **Two messages were due at the same time and only one played at once** | That is by design: one plays after the other. If the second one would start more than two minutes late it is marked *Missed*. |
 | **Something else** | Open `alarmclock.log` next to the app; every alarm, snooze, wake request and error is written there with a timestamp. |
 
-## 14. Questions people ask
+## 16. Questions people ask
 
 **Can I close the window and still get the alarm?** No. The app must stay open (minimised or behind other windows is fine). It warns you if you try to quit with an alarm set.
 
@@ -346,16 +450,21 @@ Everything is stored **next to the app**, never in your home folder:
 
 **Can I edit alarms.json by hand?** Yes, while the app is closed. It is ordinary JSON.
 
+**Does a schedule need a separate user or login per child?** No. Schedules are just named lists; the name is the only thing that says whose it is.
+
+**Can two rooms get different messages at the same moment?** Not in this version: messages on one computer play one after the other.
+
 ---
 
 ## Project layout
 
 ```
-alarm_clock.py              the whole app (core logic + tkinter GUI, ~1 900 lines)
+alarm_clock.py              the whole app (core logic + tkinter GUI, ~3 000 lines)
 requirements.txt            pygame-ce, sounddevice — that's all
 Start Alarm Clock.command   macOS launcher      Start Alarm Clock.bat   Windows launcher
 start_alarm_clock.sh        Linux launcher      build_standalone.sh     PyInstaller build
-tests/test_logic.py         headless tests for scheduling (next_fire, grace, snooze, missed)
+tests/test_logic.py         headless tests for alarm scheduling (next_fire, grace, snooze, missed)
+tests/test_schedules.py     headless tests for schedules (days, skip/undo, lateness, DST gap, migration, duplicate, queue)
 tools/make_screenshots.py   regenerates docs/screenshots/*.png from a throw-away sample alarms.json
 .claude/                    Claude Code skills + proactive review agents used to build this
 ```
@@ -365,7 +474,8 @@ tools/make_screenshots.py   regenerates docs/screenshots/*.png from a throw-away
 ## Development
 
 ```bash
-.venv/bin/python tests/test_logic.py      # scheduling logic
+.venv/bin/python tests/test_logic.py      # alarm scheduling logic
+.venv/bin/python tests/test_schedules.py  # family schedules
 bash "Start Alarm Clock.command"           # GUI smoke test
 .venv/bin/python tools/make_screenshots.py # refresh the manual's screenshots (macOS, needs Screen Recording permission)
 ```
