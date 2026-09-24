@@ -122,3 +122,5 @@ Contributions welcome — the `.claude/skills/*.md` files double as the design n
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Made by [Janaka Premathilaka](https://janaka.me) — more at **[janaka.me](https://janaka.me)**.

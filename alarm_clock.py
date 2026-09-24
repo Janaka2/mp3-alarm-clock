@@ -16,6 +16,7 @@ Runs on macOS, Windows and Linux.  Requires: pygame, sounddevice (see requiremen
 from __future__ import annotations
 
 import atexit
+import webbrowser
 import ctypes
 import json
 import os
@@ -38,6 +39,8 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 
 APP_NAME = "Alarm Clock"
+DEVELOPER = "Janaka Premathilaka"
+WEBSITE = "https://janaka.me"          # developer site, linked from the footer
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
 IS_LINUX = sys.platform.startswith("linux")
@@ -892,7 +895,7 @@ class App(tk.Tk):
                 tkfont.nametofont(name).configure(family=family, size=13)
             except tk.TclError:
                 pass
-        self.F = dict(base=(family, 13), small=(family, 11), small_b=(family, 11, "bold"), bold=(family, 13, "bold"),
+        self.F = dict(base=(family, 13), small=(family, 11), small_u=(family, 11, "underline"), small_b=(family, 11, "bold"), bold=(family, 13, "bold"),
                       title=(family, 17, "bold"), section=(family, 11, "bold"), clock=(family, 46, "bold"),
                       time=(family, 24, "bold"), stop=(family, 20, "bold"), ring_name=(family, 26, "bold"),
                       ring_time=(family, 64, "bold"))
@@ -990,8 +993,18 @@ class App(tk.Tk):
         self.l_date.pack(anchor="e")
 
         # ---- footer + big STOP bar (the bar is shown only while ringing, see _ring / _dismiss)
-        self.l_status = tk.Label(self, text="", anchor="w", bg=P["bg"], fg=P["muted"], font=F["small"], padx=24, pady=6)
-        self.l_status.pack(fill="x", side="bottom")
+        footer = tk.Frame(self, bg=P["bg"], padx=24, pady=6)
+        footer.pack(fill="x", side="bottom")
+        self.l_status = tk.Label(footer, text="", anchor="w", bg=P["bg"], fg=P["muted"], font=F["small"])
+        self.l_status.pack(side="left", fill="x", expand=True)
+        tk.Label(footer, text=f"© {datetime.now():%Y} {DEVELOPER}  ·", bg=P["bg"], fg=P["muted"],
+                 font=F["small"]).pack(side="left")
+        link = tk.Label(footer, text=WEBSITE.removeprefix("https://"), bg=P["bg"], fg=P["accent"],
+                 font=F["small"], cursor="hand2")
+        link.pack(side="left", padx=(4, 0))
+        link.bind("<Button-1>", lambda e: webbrowser.open(WEBSITE))
+        link.bind("<Enter>", lambda e: link.config(font=F["small_u"]))
+        link.bind("<Leave>", lambda e: link.config(font=F["small"]))
         self.b_stop = ttk.Button(self, text="■   STOP ALARM", style="Stop.TButton", command=self._stop_all)
 
         self.body = tk.Frame(self, bg=P["bg"], padx=22, pady=18)
