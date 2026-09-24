@@ -35,6 +35,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
 
 APP_NAME = "Alarm Clock"
 IS_MAC = sys.platform == "darwin"
@@ -878,195 +879,355 @@ class App(tk.Tk):
         log(f"started; data folder: {BASE_DIR}")
 
     # ----- UI construction
-    def _build_ui(self) -> None:
-        style = ttk.Style(self)
-        if IS_WIN:
-            style.theme_use("vista")
-        pad = {"padx": 6, "pady": 4}
+    PALETTE = dict(bg="#F3F5F9", card="#FFFFFF", line="#E3E7EE", header="#1F2A44", header2="#2E3F66",
+                   text="#1E2533", muted="#6B7280", accent="#3A6FF0", accent_dark="#2C56C4",
+                   good="#1E8E3E", warn="#C25E00", bad="#C62828", soft="#EEF1F5", soft_hover="#E1E6EE",
+                   tint_good="#E3F3E7", tint_warn="#FDEBD3", tint_bad="#FBE3E3", tint_neutral="#E9EDF3",
+                   tint_ring="#FFD9D9")
 
-        # Alarm list
-        top = ttk.LabelFrame(self, text="Alarms")
-        top.pack(fill="both", expand=True, padx=10, pady=(10, 4))
-        cols = ("on", "when", "repeat", "label", "sound", "output", "vol")
-        self.tree = ttk.Treeview(top, columns=cols, show="headings", height=6, selectmode="browse")
-        heads = {"on": ("On", 40), "when": ("Next ring", 150), "repeat": ("Repeat", 80),
-                 "label": ("Label", 130), "sound": ("Sound", 200), "output": ("Output", 150), "vol": ("Vol", 40)}
+    def _fonts(self) -> None:
+        family = "Helvetica Neue" if IS_MAC else ("Segoe UI" if IS_WIN else "DejaVu Sans")
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            try:
+                tkfont.nametofont(name).configure(family=family, size=13)
+            except tk.TclError:
+                pass
+        self.F = dict(base=(family, 13), small=(family, 11), small_b=(family, 11, "bold"), bold=(family, 13, "bold"),
+                      title=(family, 17, "bold"), section=(family, 11, "bold"), clock=(family, 46, "bold"),
+                      time=(family, 24, "bold"), stop=(family, 20, "bold"), ring_name=(family, 26, "bold"),
+                      ring_time=(family, 64, "bold"))
+
+    def _styles(self) -> None:
+        P, F = self.PALETTE, self.F
+        st = ttk.Style(self)
+        st.theme_use("clam")
+        st.configure(".", background=P["bg"], foreground=P["text"], font=F["base"], borderwidth=0, focuscolor=P["bg"])
+        st.configure("Card.TFrame", background=P["card"])
+        st.configure("Card.TLabel", background=P["card"], foreground=P["text"])
+        st.configure("Muted.TLabel", background=P["card"], foreground=P["muted"], font=F["small"])
+        st.configure("Section.TLabel", background=P["card"], foreground=P["accent"], font=F["section"])
+        st.configure("Title.TLabel", background=P["card"], foreground=P["text"], font=F["title"])
+        st.configure("TSeparator", background=P["line"])
+        st.configure("Accent.TButton", background=P["accent"], foreground="white", padding=(18, 9), font=F["bold"], borderwidth=0)
+        st.map("Accent.TButton", background=[("active", P["accent_dark"]), ("disabled", "#B8C6F0")], foreground=[("disabled", "white")])
+        st.configure("Soft.TButton", background=P["soft"], foreground=P["text"], padding=(12, 7), borderwidth=0)
+        st.map("Soft.TButton", background=[("active", P["soft_hover"])])
+        st.configure("Danger.TButton", background=P["tint_bad"], foreground=P["bad"], padding=(12, 7), borderwidth=0)
+        st.map("Danger.TButton", background=[("active", "#F6CACA")])
+        st.configure("Icon.TButton", background=P["soft"], foreground=P["text"], padding=(7, 5), borderwidth=0)
+        st.map("Icon.TButton", background=[("active", P["soft_hover"])])
+        st.configure("Stop.TButton", background=P["bad"], foreground="white", font=F["stop"], padding=(28, 16), borderwidth=0)
+        st.map("Stop.TButton", background=[("active", "#8E0000")], foreground=[("active", "white")])
+        st.configure("Ghost.TButton", background=P["header2"], foreground="white", padding=(18, 10), borderwidth=0)
+        st.map("Ghost.TButton", background=[("active", "#3A4E7C")], foreground=[("active", "white")])
+        st.configure("Seg.Toolbutton", background=P["soft"], foreground=P["text"], padding=(14, 7), borderwidth=0, font=F["base"])
+        st.map("Seg.Toolbutton", background=[("selected", P["accent"]), ("active", P["soft_hover"])],
+               foreground=[("selected", "white")])
+        st.configure("Card.TCheckbutton", background=P["card"], foreground=P["text"], padding=(0, 4))
+        st.map("Card.TCheckbutton", background=[("active", P["card"])])
+        st.configure("Treeview", background=P["card"], fieldbackground=P["card"], foreground=P["text"], rowheight=34,
+                     borderwidth=0, font=F["base"])
+        st.configure("Treeview.Heading", background=P["card"], foreground=P["muted"], font=F["small_b"], relief="flat", padding=(6, 8))
+        st.map("Treeview", background=[("selected", "#E3ECFF")], foreground=[("selected", P["text"])])
+        st.map("Treeview.Heading", background=[("active", P["card"])])
+        for w in ("TEntry", "TCombobox", "TSpinbox"):
+            st.configure(w, fieldbackground="#FFFFFF", background="#FFFFFF", bordercolor=P["line"], lightcolor=P["line"],
+                         darkcolor=P["line"], arrowcolor=P["muted"], padding=6, insertcolor=P["text"])
+        st.map("TCombobox", fieldbackground=[("readonly", "#FFFFFF")], background=[("readonly", "#FFFFFF")],
+               foreground=[("readonly", P["text"])], selectbackground=[("readonly", "#FFFFFF")],
+               selectforeground=[("readonly", P["text"])])
+        st.configure("Horizontal.TScale", background=P["card"], troughcolor=P["line"], sliderlength=22, borderwidth=0)
+        st.map("Horizontal.TScale", background=[("active", P["card"])])
+        st.configure("Meter.Horizontal.TProgressbar", background=P["good"], troughcolor=P["line"], thickness=8, borderwidth=0)
+        self.configure(bg=P["bg"])
+        self.option_add("*TCombobox*Listbox.font", F["base"])
+        self.option_add("*TCombobox*Listbox.selectBackground", "#E3ECFF")
+        self.option_add("*TCombobox*Listbox.selectForeground", P["text"])
+
+    def _card(self, parent, **pack) -> ttk.Frame:
+        outer = tk.Frame(parent, bg=self.PALETTE["card"], highlightbackground=self.PALETTE["line"], highlightthickness=1, bd=0)
+        outer.pack(**pack)
+        inner = ttk.Frame(outer, style="Card.TFrame", padding=(20, 16))
+        inner.pack(fill="both", expand=True)
+        return inner
+
+    def _pill(self, parent) -> tk.Label:
+        return tk.Label(parent, text="", font=self.F["small_b"], padx=11, pady=5,
+                        bg=self.PALETTE["tint_neutral"], fg=self.PALETTE["muted"])
+
+    def _set_pill(self, pill: tk.Label, text: str, tone: str) -> None:
+        P = self.PALETTE
+        bg, fg = {"good": (P["tint_good"], P["good"]), "warn": (P["tint_warn"], P["warn"]),
+                  "bad": (P["tint_bad"], P["bad"]), "ring": (P["tint_ring"], P["bad"])}.get(tone, (P["tint_neutral"], P["muted"]))
+        pill.config(text=text, bg=bg, fg=fg)
+
+    def _build_ui(self) -> None:
+        self._fonts()
+        self._styles()
+        P, F = self.PALETTE, self.F
+        self.geometry("1400x840")
+        self.minsize(1240, 760)
+
+        # ---- header: title + next alarm + status pills on the left, big clock on the right
+        hdr = tk.Frame(self, bg=P["header"], padx=26, pady=20)
+        hdr.pack(fill="x")
+        left = tk.Frame(hdr, bg=P["header"])
+        left.pack(side="left", fill="y")
+        tk.Label(left, text="⏰  Alarm Clock", font=F["title"], bg=P["header"], fg="white").pack(anchor="w")
+        self.l_next = tk.Label(left, text="", font=F["base"], bg=P["header"], fg="#C7D0E4", justify="left")
+        self.l_next.pack(anchor="w", pady=(6, 0))
+        pills = tk.Frame(left, bg=P["header"])
+        pills.pack(anchor="w", pady=(14, 0))
+        self.l_armed = self._pill(pills); self.l_armed.pack(side="left", padx=(0, 8))
+        self.l_awake = self._pill(pills); self.l_awake.pack(side="left", padx=(0, 8))
+        self.l_wake = self._pill(pills); self.l_wake.pack(side="left", padx=(0, 8))
+        self.b_retry_wake = ttk.Button(pills, text="Try again", style="Soft.TButton", command=self._retry_wake)
+        right = tk.Frame(hdr, bg=P["header"])
+        right.pack(side="right")
+        self.l_clock = tk.Label(right, text="--:--", font=F["clock"], bg=P["header"], fg="white")
+        self.l_clock.pack(anchor="e")
+        self.l_date = tk.Label(right, text="", font=F["base"], bg=P["header"], fg="#C7D0E4")
+        self.l_date.pack(anchor="e")
+
+        # ---- footer + big STOP bar (the bar is shown only while ringing, see _ring / _dismiss)
+        self.l_status = tk.Label(self, text="", anchor="w", bg=P["bg"], fg=P["muted"], font=F["small"], padx=24, pady=6)
+        self.l_status.pack(fill="x", side="bottom")
+        self.b_stop = ttk.Button(self, text="■   STOP ALARM", style="Stop.TButton", command=self._stop_all)
+
+        self.body = tk.Frame(self, bg=P["bg"], padx=22, pady=18)
+        self.body.pack(fill="both", expand=True)
+        right = tk.Frame(self.body, bg=P["bg"])          # packed first so the editor keeps its natural width
+        right.pack(side="right", fill="y")
+        left = tk.Frame(self.body, bg=P["bg"])
+        left.pack(side="left", fill="both", expand=True, padx=(0, 14))
+
+        # ---- left column, card 1: your alarms
+        c1 = self._card(left, fill="both", expand=True)
+        row = ttk.Frame(c1, style="Card.TFrame")
+        row.pack(fill="x")
+        ttk.Label(row, text="Your alarms", style="Title.TLabel").pack(side="left")
+        ttk.Button(row, text="＋  New alarm", style="Accent.TButton", command=self._new).pack(side="right")
+        cols = ("on", "time", "label", "repeat", "next", "sound", "output")
+        self.tree = ttk.Treeview(c1, columns=cols, show="headings", height=8, selectmode="browse")
+        heads = {"on": ("", 36, "center"), "time": ("Time", 70, "w"), "label": ("Alarm", 130, "w"),
+                 "repeat": ("Repeats", 95, "w"), "next": ("Next ring", 140, "w"), "sound": ("Sound", 105, "w"),
+                 "output": ("Plays on", 105, "w")}
         for c in cols:
-            self.tree.heading(c, text=heads[c][0])
-            self.tree.column(c, width=heads[c][1], anchor="w", stretch=(c in ("label", "sound", "output")))
-        self.tree.pack(fill="both", expand=True, side="top", padx=6, pady=6)
+            self.tree.heading(c, text=heads[c][0], anchor=heads[c][2])
+            self.tree.column(c, width=heads[c][1], anchor=heads[c][2], stretch=(c in ("label", "sound", "output")))
+        self.tree.tag_configure("off", foreground=P["muted"])
+        self.tree.tag_configure("on", foreground=P["text"])
+        self.tree.pack(fill="both", expand=True, pady=(12, 6))
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", lambda e: self._toggle_selected())
+        self.l_empty = ttk.Label(c1, text="No alarms yet.  Set one up below in three steps and press Save alarm.",
+                                 style="Muted.TLabel")
+        self.acts = ttk.Frame(c1, style="Card.TFrame")
+        self.acts.pack(fill="x")
+        ttk.Button(self.acts, text="Turn on / off", style="Soft.TButton", command=self._toggle_selected).pack(side="left")
+        ttk.Button(self.acts, text="Delete", style="Danger.TButton", command=self._delete_selected).pack(side="left", padx=8)
+        ttk.Button(self.acts, text="Ring it now (test)", style="Soft.TButton", command=self._ring_selected).pack(side="right")
+        ttk.Label(c1, text="Tip: click an alarm to edit it, double-click to turn it on or off.", style="Muted.TLabel").pack(anchor="w", pady=(8, 0))
 
-        bar = ttk.Frame(top)
-        bar.pack(fill="x", padx=6, pady=(0, 6))
-        ttk.Button(bar, text="New alarm", command=self._new).pack(side="left")
-        ttk.Button(bar, text="Enable / disable", command=self._toggle_selected).pack(side="left", padx=4)
-        ttk.Button(bar, text="Delete", command=self._delete_selected).pack(side="left")
-        ttk.Button(bar, text="Ring selected now (test)", command=self._ring_selected).pack(side="right")
-
-        # Editor
-        ed = ttk.LabelFrame(self, text="Alarm details")
-        ed.pack(fill="x", padx=10, pady=4)
-        for i in range(8):
-            ed.columnconfigure(i, weight=0)
-        ed.columnconfigure(7, weight=1)
-
-        ttk.Label(ed, text="Label").grid(row=0, column=0, sticky="w", **pad)
+        # ---- right column, card 2: the editor (three steps)
+        c2 = self._card(right, fill="both", expand=True)
+        row = ttk.Frame(c2, style="Card.TFrame")
+        row.pack(fill="x")
+        self.l_editor_title = ttk.Label(row, text="New alarm", style="Title.TLabel")
+        self.l_editor_title.pack(side="left")
+        name = ttk.Frame(c2, style="Card.TFrame")
+        name.pack(fill="x", pady=(12, 4))
+        ttk.Label(name, text="Name", style="Card.TLabel", width=7).pack(side="left")
         self.v_label = tk.StringVar()
-        ttk.Entry(ed, textvariable=self.v_label, width=28).grid(row=0, column=1, columnspan=3, sticky="we", **pad)
+        ttk.Entry(name, textvariable=self.v_label, font=F["base"], width=36).pack(side="left")
 
-        ttk.Label(ed, text="Repeat").grid(row=0, column=4, sticky="e", **pad)
-        self.v_repeat = tk.StringVar(value="once")
-        rep = ttk.Frame(ed)
-        rep.grid(row=0, column=5, columnspan=3, sticky="w", **pad)
-        for txt, val in (("Once", "once"), ("Every day", "daily"), ("Weekdays", "weekdays")):
-            ttk.Radiobutton(rep, text=txt, value=val, variable=self.v_repeat).pack(side="left", padx=(0, 8))
+        grid = ttk.Frame(c2, style="Card.TFrame")
+        grid.pack(fill="x", pady=(10, 0))
+        grid.columnconfigure(1, weight=1)
 
-        ttk.Label(ed, text="Date").grid(row=1, column=0, sticky="w", **pad)
-        df = ttk.Frame(ed)
-        df.grid(row=1, column=1, columnspan=3, sticky="w", **pad)
-        self.v_year = tk.StringVar(); self.v_month = tk.StringVar(); self.v_day = tk.StringVar()
-        ttk.Spinbox(df, from_=2024, to=2100, width=6, textvariable=self.v_year, format="%04.0f").pack(side="left")
-        ttk.Label(df, text="-").pack(side="left")
-        ttk.Spinbox(df, from_=1, to=12, width=4, textvariable=self.v_month, format="%02.0f", wrap=True).pack(side="left")
-        ttk.Label(df, text="-").pack(side="left")
-        ttk.Spinbox(df, from_=1, to=31, width=4, textvariable=self.v_day, format="%02.0f", wrap=True).pack(side="left")
-        ttk.Button(df, text="Today", width=7, command=lambda: self._set_date(date.today())).pack(side="left", padx=(8, 2))
-        ttk.Button(df, text="Tomorrow", width=9,
-                   command=lambda: self._set_date(date.today() + timedelta(days=1))).pack(side="left")
-
-        ttk.Label(ed, text="Time").grid(row=1, column=4, sticky="e", **pad)
-        tf = ttk.Frame(ed)
-        tf.grid(row=1, column=5, columnspan=3, sticky="w", **pad)
+        # ① When
+        ttk.Label(grid, text="①  WHEN", style="Section.TLabel", width=11).grid(row=0, column=0, sticky="nw", pady=(8, 0))
+        when = ttk.Frame(grid, style="Card.TFrame")
+        when.grid(row=0, column=1, sticky="we")
+        self.time_row = ttk.Frame(when, style="Card.TFrame")
+        self.time_row.pack(fill="x")
         self.v_hour = tk.StringVar(); self.v_min = tk.StringVar()
-        ttk.Spinbox(tf, from_=0, to=23, width=4, textvariable=self.v_hour, format="%02.0f", wrap=True).pack(side="left")
-        ttk.Label(tf, text=":").pack(side="left")
-        ttk.Spinbox(tf, from_=0, to=59, width=4, textvariable=self.v_min, format="%02.0f", wrap=True).pack(side="left")
-        ttk.Label(tf, text="(24 h)").pack(side="left", padx=(6, 8))
-        ttk.Button(tf, text="+1 min", width=7, command=lambda: self._set_datetime(datetime.now() + timedelta(minutes=1))).pack(side="left")
-        ttk.Button(tf, text="+10 min", width=8, command=lambda: self._set_datetime(datetime.now() + timedelta(minutes=10))).pack(side="left", padx=2)
-
-        ttk.Label(ed, text="Sound file").grid(row=2, column=0, sticky="w", **pad)
-        self.v_sound = tk.StringVar()
-        ttk.Entry(ed, textvariable=self.v_sound).grid(row=2, column=1, columnspan=5, sticky="we", **pad)
-        sf = ttk.Frame(ed)
-        sf.grid(row=2, column=6, columnspan=2, sticky="w", **pad)
-        ttk.Button(sf, text="Browse…", command=self._browse).pack(side="left")
-        self.b_test = ttk.Button(sf, text="▶ Test", width=7, command=self._test_play)
-        self.b_test.pack(side="left", padx=4)
-        ttk.Button(sf, text="■ Stop", width=7, command=self._stop_all).pack(side="left")
-
-        ttk.Label(ed, text="Volume").grid(row=3, column=0, sticky="w", **pad)
-        self.v_volume = tk.IntVar(value=80)
-        vs = ttk.Scale(ed, from_=0, to=100, orient="horizontal", variable=self.v_volume,
-                       command=lambda v: self._on_volume())
-        vs.grid(row=3, column=1, columnspan=4, sticky="we", **pad)
-        self.l_volume = ttk.Label(ed, text="80 %", width=6)
-        self.l_volume.grid(row=3, column=5, sticky="w", **pad)
-        ttk.Label(ed, text="Ring for up to").grid(row=3, column=6, sticky="e", **pad)
-        rf = ttk.Frame(ed)
-        rf.grid(row=3, column=7, sticky="w", **pad)
+        ttk.Spinbox(self.time_row, from_=0, to=23, width=3, textvariable=self.v_hour, format="%02.0f", wrap=True,
+                    font=F["time"], justify="center").pack(side="left")
+        ttk.Label(self.time_row, text=":", style="Card.TLabel", font=F["time"]).pack(side="left", padx=4)
+        ttk.Spinbox(self.time_row, from_=0, to=59, width=3, textvariable=self.v_min, format="%02.0f", wrap=True,
+                    font=F["time"], justify="center").pack(side="left")
+        self.v_repeat = tk.StringVar(value="once")
+        seg = ttk.Frame(self.time_row, style="Card.TFrame")
+        seg.pack(side="left", padx=(26, 0))
+        for txt, val in (("Just once", "once"), ("Every day", "daily"), ("Weekdays", "weekdays")):
+            ttk.Radiobutton(seg, text=txt, value=val, variable=self.v_repeat, style="Seg.Toolbutton").pack(side="left", padx=(0, 3))
+        self.v_repeat.trace_add("write", lambda *_: self._on_repeat_change())
+        self.date_row = ttk.Frame(when, style="Card.TFrame")
+        self.date_row.pack(fill="x", pady=(10, 0))
+        ttk.Label(self.date_row, text="on", style="Muted.TLabel").pack(side="left", padx=(2, 8))
+        self.v_year = tk.StringVar(); self.v_month = tk.StringVar(); self.v_day = tk.StringVar()
+        ttk.Spinbox(self.date_row, from_=2024, to=2100, width=5, textvariable=self.v_year, format="%04.0f").pack(side="left")
+        ttk.Label(self.date_row, text="-", style="Card.TLabel").pack(side="left")
+        ttk.Spinbox(self.date_row, from_=1, to=12, width=3, textvariable=self.v_month, format="%02.0f", wrap=True).pack(side="left")
+        ttk.Label(self.date_row, text="-", style="Card.TLabel").pack(side="left")
+        ttk.Spinbox(self.date_row, from_=1, to=31, width=3, textvariable=self.v_day, format="%02.0f", wrap=True).pack(side="left")
+        ttk.Button(self.date_row, text="Today", style="Soft.TButton", command=lambda: self._set_date(date.today())).pack(side="left", padx=(12, 4))
+        ttk.Button(self.date_row, text="Tomorrow", style="Soft.TButton",
+                   command=lambda: self._set_date(date.today() + timedelta(days=1))).pack(side="left")
+        quick = ttk.Frame(when, style="Card.TFrame")
+        quick.pack(fill="x", pady=(10, 0))
+        ttk.Label(quick, text="Try it quickly:", style="Muted.TLabel").pack(side="left", padx=(2, 8))
+        ttk.Button(quick, text="In 1 min", style="Soft.TButton",
+                   command=lambda: self._set_datetime(datetime.now() + timedelta(minutes=1))).pack(side="left", padx=(0, 4))
+        ttk.Button(quick, text="In 10 min", style="Soft.TButton",
+                   command=lambda: self._set_datetime(datetime.now() + timedelta(minutes=10))).pack(side="left")
+        ttk.Label(quick, text="Stop ringing after", style="Muted.TLabel").pack(side="left", padx=(22, 6))
         self.v_ring = tk.StringVar(value="10")
-        ttk.Spinbox(rf, from_=1, to=120, width=4, textvariable=self.v_ring).pack(side="left")
-        ttk.Label(rf, text="min").pack(side="left", padx=4)
+        ttk.Spinbox(quick, from_=1, to=120, width=3, textvariable=self.v_ring).pack(side="left")
+        ttk.Label(quick, text="minutes", style="Muted.TLabel").pack(side="left", padx=4)
 
-        # Output device (per alarm)
-        ttk.Label(ed, text="Play on").grid(row=4, column=0, sticky="w", **pad)
-        of = ttk.Frame(ed)
-        of.grid(row=4, column=1, columnspan=7, sticky="we", **pad)
-        self.v_output = tk.StringVar(value=self.DEFAULT_OUTPUT)
-        self.cb_output = ttk.Combobox(of, textvariable=self.v_output, state="readonly", width=34)
-        self.cb_output.pack(side="left")
-        self.cb_output.bind("<<ComboboxSelected>>", self._on_output_selected)
-        ttk.Button(of, text="↻", width=2, command=lambda: self._refresh_outputs(load_airplay=True)).pack(side="left", padx=(2, 8))
-        ttk.Label(of, text="speakers / headset / HDMI" + (" / AirPlay (HomePod, Apple TV) – chosen per alarm" if IS_MAC else " – chosen per alarm"),
-                  foreground="#666").pack(side="left")
-        self._refresh_outputs()
+        ttk.Separator(grid).grid(row=1, column=0, columnspan=2, sticky="we", pady=14)
 
-        # Recorder
-        ttk.Label(ed, text="Record voice").grid(row=5, column=0, sticky="w", **pad)
-        rcf = ttk.Frame(ed)
-        rcf.grid(row=5, column=1, columnspan=7, sticky="we", **pad)
+        # ② Sound
+        ttk.Label(grid, text="②  SOUND", style="Section.TLabel").grid(row=2, column=0, sticky="nw", pady=(4, 0))
+        snd = ttk.Frame(grid, style="Card.TFrame")
+        snd.grid(row=2, column=1, sticky="we")
+        self.v_sound = tk.StringVar()
+        srow = ttk.Frame(snd, style="Card.TFrame")
+        srow.pack(fill="x")
+        self.l_sound_name = ttk.Label(srow, text="No sound chosen yet", style="Card.TLabel", font=F["bold"])
+        self.l_sound_name.pack(side="left")
+        self.l_sound_path = ttk.Label(srow, text="", style="Muted.TLabel")
+        self.l_sound_path.pack(side="left", padx=(10, 0))
+        self.v_sound.trace_add("write", lambda *_: self._on_sound_change())
+        brow = ttk.Frame(snd, style="Card.TFrame")
+        brow.pack(fill="x", pady=(8, 0))
+        ttk.Button(brow, text="Choose a file…", style="Soft.TButton", command=self._browse).pack(side="left")
+        self.b_rec = ttk.Button(brow, text="🎤  Record my voice", style="Soft.TButton", command=self._toggle_record)
+        self.b_rec.pack(side="left", padx=8)
+        self.b_test = ttk.Button(brow, text="▶  Preview", style="Soft.TButton", command=self._test_play)
+        self.b_test.pack(side="left")
+        ttk.Button(brow, text="■  Stop", style="Soft.TButton", command=self._stop_all).pack(side="left", padx=8)
+        mrow = ttk.Frame(snd, style="Card.TFrame")
+        mrow.pack(fill="x", pady=(8, 0))
+        ttk.Label(mrow, text="Microphone", style="Muted.TLabel").pack(side="left", padx=(2, 8))
         self.devices = Recorder.input_devices()
         self.v_mic = tk.StringVar(value=self.devices[0][1] if self.devices else "No microphone found")
-        self.cb_mic = ttk.Combobox(rcf, textvariable=self.v_mic, state="readonly", width=34,
-                                   values=[d[1] for d in self.devices])
+        self.cb_mic = ttk.Combobox(mrow, textvariable=self.v_mic, state="readonly", width=30,
+                                   values=[d[1] for d in self.devices], font=F["small"])
         self.cb_mic.pack(side="left")
-        ttk.Button(rcf, text="↻", width=2, command=self._refresh_mics).pack(side="left", padx=(2, 8))
-        self.b_rec = ttk.Button(rcf, text="● Record", width=10, command=self._toggle_record)
-        self.b_rec.pack(side="left")
-        self.meter = ttk.Progressbar(rcf, length=140, maximum=100)
-        self.meter.pack(side="left", padx=8)
-        self.l_rec = ttk.Label(rcf, text="")
-        self.l_rec.pack(side="left")
+        ttk.Button(mrow, text="↻", style="Icon.TButton", command=self._refresh_mics).pack(side="left", padx=(4, 12))
+        self.meter = ttk.Progressbar(mrow, length=110, maximum=100, style="Meter.Horizontal.TProgressbar")
+        self.meter.pack(side="left")
+        self.l_rec = ttk.Label(snd, text="", style="Muted.TLabel")
+        self.l_rec.pack(anchor="w", padx=(2, 0), pady=(4, 0))
+        vrow = ttk.Frame(snd, style="Card.TFrame")
+        vrow.pack(fill="x", pady=(12, 0))
+        ttk.Label(vrow, text="Volume", style="Muted.TLabel").pack(side="left", padx=(2, 10))
+        ttk.Label(vrow, text="🔈", style="Card.TLabel").pack(side="left")
+        self.v_volume = tk.IntVar(value=80)
+        ttk.Scale(vrow, from_=0, to=100, orient="horizontal", variable=self.v_volume, length=300,
+                  command=lambda v: self._on_volume()).pack(side="left", padx=8)
+        ttk.Label(vrow, text="🔊", style="Card.TLabel").pack(side="left")
+        self.l_volume = ttk.Label(vrow, text="80 %", style="Card.TLabel", font=F["bold"], width=6)
+        self.l_volume.pack(side="left", padx=(10, 0))
 
-        # Save row
-        sv = ttk.Frame(ed)
-        sv.grid(row=6, column=0, columnspan=8, sticky="we", **pad)
-        self.b_save = ttk.Button(sv, text="Add alarm", command=self._save)
+        ttk.Separator(grid).grid(row=3, column=0, columnspan=2, sticky="we", pady=14)
+
+        # ③ Where
+        ttk.Label(grid, text="③  WHERE", style="Section.TLabel").grid(row=4, column=0, sticky="nw", pady=(6, 0))
+        where = ttk.Frame(grid, style="Card.TFrame")
+        where.grid(row=4, column=1, sticky="we")
+        self.v_output = tk.StringVar(value=self.DEFAULT_OUTPUT)
+        wrow = ttk.Frame(where, style="Card.TFrame")
+        wrow.pack(fill="x")
+        self.cb_output = ttk.Combobox(wrow, textvariable=self.v_output, state="readonly", width=40)
+        self.cb_output.pack(side="left")
+        self.cb_output.bind("<<ComboboxSelected>>", self._on_output_selected)
+        ttk.Button(wrow, text="↻", style="Icon.TButton", command=lambda: self._refresh_outputs(load_airplay=True)).pack(side="left", padx=(4, 0))
+        ttk.Label(where, text="Speakers, headset, HDMI" + (", or an AirPlay speaker such as a HomePod" if IS_MAC else ""),
+                  style="Muted.TLabel").pack(anchor="w", padx=(2, 0), pady=(4, 0))
+        self._refresh_outputs()
+
+        # save row
+        save = ttk.Frame(c2, style="Card.TFrame")
+        save.pack(fill="x", pady=(18, 0))
+        self.b_save = ttk.Button(save, text="Save alarm", style="Accent.TButton", command=self._save)
         self.b_save.pack(side="left")
-        ttk.Button(sv, text="Clear form", command=self._new).pack(side="left", padx=6)
-        self.l_form_hint = ttk.Label(sv, text="", foreground="#666")
-        self.l_form_hint.pack(side="left", padx=10)
+        ttk.Button(save, text="Cancel", style="Soft.TButton", command=self._new).pack(side="left", padx=8)
+        self.l_form_hint = ttk.Label(save, text="", style="Muted.TLabel")
+        self.l_form_hint.pack(side="left", padx=12)
 
-        # Power options
-        po = ttk.LabelFrame(self, text="Sleep / power")
-        po.pack(fill="x", padx=10, pady=4)
+        # ---- left column, below the list: more options (collapsed by default)
+        more_bar = tk.Frame(left, bg=P["bg"])
+        more_bar.pack(fill="x", pady=(12, 0))
+        self.b_more = ttk.Button(more_bar, text="▸  More options  (sleep, snooze, fade-in)", style="Soft.TButton", command=self._toggle_more)
+        self.b_more.pack(side="left")
+        self.more_card_outer = tk.Frame(left, bg=P["card"], highlightbackground=P["line"], highlightthickness=1)
+        mc = ttk.Frame(self.more_card_outer, style="Card.TFrame", padding=(20, 12))
+        mc.pack(fill="both", expand=True)
         s = self.store.settings
         self.v_keep = tk.BooleanVar(value=s["keep_awake"])
         self.v_wake = tk.BooleanVar(value=s["schedule_wake"])
         self.v_sysvol = tk.BooleanVar(value=s["force_system_volume"])
         self.v_sysvol_level = tk.StringVar(value=str(s["system_volume"]))
         self.v_snooze = tk.StringVar(value=str(s["snooze_minutes"]))
-        ttk.Checkbutton(po, text="Keep computer awake while an alarm is armed",
-                        variable=self.v_keep, command=self._settings_changed).grid(row=0, column=0, sticky="w", **pad)
-        wake_txt = "Schedule a system wake before the next alarm"
-        if IS_MAC:
-            wake_txt += "  (asks for your Mac password)"
-        elif IS_LINUX:
-            wake_txt += "  (asks for your password, uses rtcwake)"
-        else:
-            wake_txt += "  (wake timer)"
-        ttk.Checkbutton(po, text=wake_txt, variable=self.v_wake,
-                        command=self._settings_changed).grid(row=1, column=0, sticky="w", **pad)
-        f2 = ttk.Frame(po)
-        f2.grid(row=2, column=0, sticky="w", **pad)
-        ttk.Checkbutton(f2, text="When ringing, set the system output volume to",
-                        variable=self.v_sysvol, command=self._settings_changed).pack(side="left")
-        ttk.Spinbox(f2, from_=10, to=100, width=4, textvariable=self.v_sysvol_level,
-                    command=self._settings_changed).pack(side="left", padx=4)
-        ttk.Label(f2, text="%      Snooze").pack(side="left")
-        ttk.Spinbox(f2, from_=1, to=60, width=4, textvariable=self.v_snooze,
-                    command=self._settings_changed).pack(side="left", padx=4)
-        ttk.Label(f2, text="min      Fade in over").pack(side="left")
         self.v_fade = tk.StringVar(value=str(s.get("fade_seconds", 20)))
-        ttk.Spinbox(f2, from_=0, to=120, width=4, textvariable=self.v_fade,
-                    command=self._settings_changed).pack(side="left", padx=4)
-        ttk.Label(f2, text="s").pack(side="left")
+        ttk.Checkbutton(mc, text="Keep my computer awake while an alarm is set", variable=self.v_keep,
+                        style="Card.TCheckbutton", command=self._settings_changed).pack(anchor="w")
+        ttk.Checkbutton(mc, text="Wake my computer from sleep for alarms", variable=self.v_wake,
+                        style="Card.TCheckbutton", command=self._settings_changed).pack(anchor="w")
+        ttk.Label(mc, text=("macOS asks for your password once each time the next alarm changes." if IS_MAC else
+                            "Asks for your password (uses rtcwake)." if IS_LINUX else
+                            "Uses a Windows wake timer; allow wake timers in your power plan."),
+                  style="Muted.TLabel").pack(anchor="w", padx=(26, 0))
+        r = ttk.Frame(mc, style="Card.TFrame")
+        r.pack(anchor="w", pady=(2, 0))
+        ttk.Checkbutton(r, text="Turn the system volume up to", variable=self.v_sysvol, style="Card.TCheckbutton",
+                        command=self._settings_changed).pack(side="left")
+        ttk.Spinbox(r, from_=10, to=100, width=3, textvariable=self.v_sysvol_level).pack(side="left", padx=4)
+        ttk.Label(r, text="% when an alarm rings", style="Card.TLabel").pack(side="left")
+        r2 = ttk.Frame(mc, style="Card.TFrame")
+        r2.pack(anchor="w", pady=(10, 4))
+        ttk.Label(r2, text="Snooze for", style="Card.TLabel").pack(side="left")
+        ttk.Spinbox(r2, from_=1, to=60, width=3, textvariable=self.v_snooze).pack(side="left", padx=4)
+        ttk.Label(r2, text="minutes", style="Card.TLabel").pack(side="left")
+        r3 = ttk.Frame(mc, style="Card.TFrame")
+        r3.pack(anchor="w", pady=(4, 4))
+        ttk.Label(r3, text="Fade the sound in over", style="Card.TLabel").pack(side="left")
+        ttk.Spinbox(r3, from_=0, to=120, width=3, textvariable=self.v_fade).pack(side="left", padx=4)
+        ttk.Label(r3, text="seconds", style="Card.TLabel").pack(side="left")
         for var in (self.v_sysvol_level, self.v_snooze, self.v_fade):
             var.trace_add("write", lambda *_: self._settings_changed())
 
-        # State indicators: armed / awake / OS wake – always visible
-        st = ttk.Frame(po)
-        st.grid(row=3, column=0, sticky="we", **pad)
-        self.l_armed = ttk.Label(st, text="", width=34, anchor="w")
-        self.l_armed.pack(side="left")
-        self.l_awake = ttk.Label(st, text="", width=26, anchor="w")
-        self.l_awake.pack(side="left")
-        self.l_wake = ttk.Label(st, text="", anchor="w")
-        self.l_wake.pack(side="left")
-        self.b_retry_wake = ttk.Button(st, text="Retry", width=6, command=self._retry_wake)
+    def _toggle_more(self) -> None:
+        if self.more_card_outer.winfo_ismapped():
+            self.more_card_outer.pack_forget()
+            self.b_more.config(text="▸  More options  (sleep, snooze, fade-in)")
+        else:
+            self.more_card_outer.pack(fill="x", pady=(8, 0))
+            self.b_more.config(text="▾  More options")
 
-        # Big stop button + status bar
-        bottom = ttk.Frame(self)
-        bottom.pack(fill="x", side="bottom")
-        self.l_status = ttk.Label(bottom, text="", anchor="w", relief="sunken", padding=(8, 4))
-        self.l_status.pack(fill="x", side="bottom")
-        self.b_stop = tk.Button(bottom, text="■  STOP ALARM", font=("Helvetica", 18, "bold"),
-                                bg="#c62828", fg="white", activebackground="#8e0000",
-                                activeforeground="white", height=2, command=self._stop_all)
-        # (packed only while ringing – see _ring / _dismiss)
+    def _on_repeat_change(self) -> None:
+        """The date only matters for a one-time alarm; hide it for repeating ones."""
+        if self.v_repeat.get() == "once":
+            if not self.date_row.winfo_ismapped():
+                self.date_row.pack(fill="x", pady=(10, 0), after=self.time_row)
+        else:
+            self.date_row.pack_forget()
+
+    def _on_sound_change(self) -> None:
+        p = self.v_sound.get().strip()
+        if not p:
+            self.l_sound_name.config(text="No sound chosen yet")
+            self.l_sound_path.config(text="")
+            return
+        folder = os.path.dirname(p).replace(os.path.expanduser("~"), "~")
+        if len(folder) > 48:
+            folder = "…" + folder[-47:]
+        self.l_sound_name.config(text=os.path.basename(p))
+        self.l_sound_path.config(text=folder if os.path.isfile(p) else "file not found")
 
     # ----- form helpers
     DEFAULT_OUTPUT = "System default output"
@@ -1159,9 +1320,10 @@ class App(tk.Tk):
         self.v_volume.set(a["volume"])
         self.v_ring.set(str(a.get("ring_minutes", 10)))
         self._on_volume()
-        self.b_save.config(text="Save changes" if self.editing_id else "Add alarm")
-        self.l_form_hint.config(text=f"Editing “{a['label']}”" if self.editing_id else "")
-        self._form_id = a["id"]
+        self.b_save.config(text="Save changes" if self.editing_id else "Save alarm")
+        self.l_editor_title.config(text=f"Editing “{a['label']}”" if self.editing_id else "New alarm")
+        self.l_form_hint.config(text="")
+        self._on_repeat_change()
 
     def _read_form(self) -> dict | None:
         try:
@@ -1178,7 +1340,7 @@ class App(tk.Tk):
             return None
         sound = self.v_sound.get().strip()
         if not sound or not os.path.isfile(sound):
-            messagebox.showerror(APP_NAME, "Please choose a sound file (or record one) first.")
+            messagebox.showerror(APP_NAME, "Step ② is missing: choose a sound file or record your voice first.")
             return None
         a = self.store.get(self.editing_id) if self.editing_id else None
         a = dict(a) if a else new_alarm()
@@ -1220,6 +1382,7 @@ class App(tk.Tk):
         self.l_form_hint.config(text=f"Saved – rings {nf:%a %d %b %H:%M}" if nf else "Saved")
         self.editing_id = a["id"]
         self.b_save.config(text="Save changes")
+        self.l_editor_title.config(text=f"Editing “{a['label']}”")
 
     def _selected(self) -> dict | None:
         sel = self.tree.selection()
@@ -1269,7 +1432,7 @@ class App(tk.Tk):
     def _test_play(self) -> None:
         p = self.v_sound.get().strip()
         if not p or not os.path.isfile(p):
-            messagebox.showerror(APP_NAME, "Choose a sound file first.")
+            messagebox.showerror(APP_NAME, "Choose a sound file or record your voice first.")
             return
         out = self._get_output()
         if self._is_airplay(out):
@@ -1384,15 +1547,19 @@ class App(tk.Tk):
     def _refresh_list(self, select: str | None = None) -> None:
         self.tree.delete(*self.tree.get_children())
         now = datetime.now()
+        repeat_txt = {"once": "Just once", "daily": "Every day", "weekdays": "Weekdays"}
         rows = sorted(self.store.alarms, key=lambda a: (not a["enabled"], next_fire(a, now) or datetime.max))
         for a in rows:
             nf = next_fire(a, now)
-            when = f"{nf:%a %d %b %H:%M}" if nf else ("—" if not a["enabled"] else "?")
-            self.tree.insert("", "end", iid=a["id"], values=(
-                "✔" if a["enabled"] else "", when, a["repeat"], a["label"],
-                os.path.basename(a["sound"]), output_label(a.get("output", "")), a["volume"]))
+            self.tree.insert("", "end", iid=a["id"], tags=("on" if a["enabled"] else "off",), values=(
+                "●" if a["enabled"] else "○", a["time"], a["label"], repeat_txt.get(a["repeat"], a["repeat"]),
+                f"{nf:%a %d %b %H:%M}" if nf else "Off", os.path.basename(a["sound"]), output_label(a.get("output", ""))))
         if select and self.tree.exists(select):
             self.tree.selection_set(select)
+        if self.store.alarms:
+            self.l_empty.pack_forget()
+        elif not self.l_empty.winfo_ismapped():
+            self.l_empty.pack(anchor="w", pady=(0, 10), before=self.acts)
 
     def _apply_power(self) -> None:
         s = self.store.settings
@@ -1404,28 +1571,38 @@ class App(tk.Tk):
     def _tick_indicators(self) -> None:
         ev = self.scheduler.next_event()
         now = datetime.now()
+        s = self.store.settings
         if self.ring_windows:
-            self.l_armed.config(text="🔔 RINGING", foreground="#c62828")
+            self._set_pill(self.l_armed, "🔔  Ringing now", "ring")
         elif ev:
-            self.l_armed.config(text=f"● Armed – next ring in {fmt_delta(ev[0] - now)}", foreground="#2e7d32")
+            self._set_pill(self.l_armed, f"●  Alarm set · rings in {fmt_delta(ev[0] - now)}", "good")
         else:
-            self.l_armed.config(text="○ No alarm armed", foreground="#666")
+            self._set_pill(self.l_armed, "○  No alarm set", "neutral")
         if self.power.keeping_awake:
-            self.l_awake.config(text="● Keeping computer awake", foreground="#2e7d32")
-        elif ev and not self.store.settings.get("keep_awake"):
-            self.l_awake.config(text="○ Computer may sleep (keep-awake is off)", foreground="#e65100")
+            self._set_pill(self.l_awake, "●  Computer will stay awake", "good")
+        elif ev and not s.get("keep_awake"):
+            self._set_pill(self.l_awake, "△  Computer may fall asleep (option is off)", "warn")
         elif ev:
-            self.l_awake.config(text="○ Computer may sleep (keep-awake failed, see log)", foreground="#c62828")
+            self._set_pill(self.l_awake, "△  Could not keep the computer awake", "bad")
         else:
-            self.l_awake.config(text="○ Not holding computer awake", foreground="#666")
+            self._set_pill(self.l_awake, "○  Not keeping the computer awake", "neutral")
         state = self.power.wake_state
-        colour = {"registered": "#2e7d32", "registering": "#666", "declined": "#e65100",
-                  "failed": "#c62828"}.get(state, "#666")
-        wake_txt = self.power.describe_wake()
-        if ev and self.store.settings.get("schedule_wake") and state == "none" and self.power.wake_target is None:
-            wake_txt = "no OS wake needed (alarm is less than a minute away)" if ev[0] - now < timedelta(
-                seconds=WAKE_LEAD_SECONDS + 1) else wake_txt
-        self.l_wake.config(text="●  " + wake_txt if state == "registered" else "○  " + wake_txt, foreground=colour)
+        if state == "registered" and self.power.wake_target:
+            self._set_pill(self.l_wake, f"●  Will wake from sleep at {self.power.wake_target:%H:%M}", "good")
+        elif state == "registering":
+            self._set_pill(self.l_wake, "…  Setting up wake from sleep", "neutral")
+        elif state == "declined":
+            self._set_pill(self.l_wake, "△  Wake from sleep not set – password was declined", "warn")
+        elif state == "failed":
+            self._set_pill(self.l_wake, "△  Wake from sleep could not be set", "bad")
+        elif state == "unsupported":
+            self._set_pill(self.l_wake, "○  Wake from sleep is not available here", "neutral")
+        elif ev and s.get("schedule_wake") and ev[0] - now < timedelta(seconds=WAKE_LEAD_SECONDS + 1):
+            self._set_pill(self.l_wake, "○  Alarm is too soon to need a wake-up", "neutral")
+        elif ev and not s.get("schedule_wake"):
+            self._set_pill(self.l_wake, "○  Wake from sleep is off", "neutral")
+        else:
+            self._set_pill(self.l_wake, "○  No wake-up scheduled", "neutral")
         if state in ("declined", "failed") and ev:
             self.b_retry_wake.pack(side="left", padx=6)
         else:
@@ -1434,11 +1611,13 @@ class App(tk.Tk):
     def _tick_status(self) -> None:
         ev = self.scheduler.next_event()
         now = datetime.now()
+        self.l_clock.config(text=f"{now:%H:%M}")
+        self.l_date.config(text=f"{now:%A, %d %B %Y}   {now:%S}s")
         if ev:
-            txt = f"Next: “{ev[1]['label']}” {ev[0]:%a %d %b %H:%M} (in {fmt_delta(ev[0] - now)})"
+            self.l_next.config(text=f"Next alarm:  {ev[1]['label']}  ·  {ev[0]:%A %d %b at %H:%M}  ·  in {fmt_delta(ev[0] - now)}")
         else:
-            txt = "No alarm armed"
-        self.l_status.config(text=f"{now:%H:%M:%S}   {txt}   •   data folder: {BASE_DIR}")
+            self.l_next.config(text="No alarm set yet.  Set one up below – it takes three steps.")
+        self.l_status.config(text=f"Alarms and recordings are kept in {BASE_DIR}")
         self._tick_indicators()
         if (self.airplay and ev and self._is_airplay(ev[1].get("output", "")) and self._prewarmed != ev[1]["id"]
                 and timedelta(0) <= ev[0] - now <= timedelta(minutes=3)):
@@ -1486,7 +1665,7 @@ class App(tk.Tk):
         problem = ""
         if not os.path.isfile(a["sound"]):
             problem = (f"The sound file for “{a['label']}” is missing:\n{a['sound']}\n\n"
-                       "It may have been moved or deleted. Pick another file in Alarm details and save.")
+                       "It may have been moved or deleted. Choose another file below and save the alarm.")
         elif use_airplay:
             self._play_airplay(a, a["sound"], int(a["volume"]), a["output"][len(AirPlayPlayer.PREFIX):], loop=True, fade=fade)
         else:
@@ -1512,25 +1691,27 @@ class App(tk.Tk):
         if a["id"] in self.ring_windows:
             self.ring_windows[a["id"]].lift()
             return
-        win = tk.Toplevel(self)
+        P, F = self.PALETTE, self.F
+        win = tk.Toplevel(self, bg=P["header"])
         win.title("⏰ " + a["label"])
         win.attributes("-topmost", True)
-        win.geometry("460x300")
+        w, h = 600, 470
+        win.geometry(f"{w}x{h}+{(win.winfo_screenwidth() - w) // 2}+{(win.winfo_screenheight() - h) // 3}")
         win.protocol("WM_DELETE_WINDOW", lambda: self._dismiss(a["id"]))
-        ttk.Label(win, text="⏰", font=("Helvetica", 40)).pack(pady=(14, 0))
-        ttk.Label(win, text=a["label"], font=("Helvetica", 20, "bold")).pack()
-        ttk.Label(win, text=f"{when:%A %d %B %Y  %H:%M}").pack(pady=(0, 10))
-        tk.Button(win, text="■  STOP", font=("Helvetica", 22, "bold"), bg="#c62828", fg="white",
-                  activebackground="#8e0000", activeforeground="white", width=14, height=2,
-                  command=lambda: self._dismiss(a["id"])).pack(pady=4)
-        ttk.Button(win, text=f"Snooze {s.get('snooze_minutes', 5)} min",
-                   command=lambda: self._snooze(a)).pack(pady=(6, 0))
+        tk.Label(win, text="⏰  ALARM", font=F["small_b"], bg=P["header"], fg="#C7D0E4").pack(pady=(30, 0))
+        tk.Label(win, text=f"{when:%H:%M}", font=F["ring_time"], bg=P["header"], fg="white").pack()
+        tk.Label(win, text=a["label"], font=F["ring_name"], bg=P["header"], fg="white").pack()
+        tk.Label(win, text=f"{when:%A, %d %B}", font=F["base"], bg=P["header"], fg="#C7D0E4").pack(pady=(2, 22))
+        ttk.Button(win, text="■   STOP", style="Stop.TButton", command=lambda: self._dismiss(a["id"])).pack()
+        ttk.Button(win, text=f"Snooze {s.get('snooze_minutes', 5)} minutes", style="Ghost.TButton",
+                   command=lambda: self._snooze(a)).pack(pady=(14, 0))
+        tk.Label(win, text="Enter or Esc also stops it", font=F["small"], bg=P["header"], fg="#8E9BB8").pack(pady=(14, 0))
         win.bind("<Return>", lambda e: self._dismiss(a["id"]))
         win.bind("<Escape>", lambda e: self._dismiss(a["id"]))
         self.ring_windows[a["id"]] = win
         self.ring_timeouts[a["id"]] = self.after(int(a.get("ring_minutes", 10)) * 60_000,
                                                  lambda: self._dismiss(a["id"], timed_out=True))
-        self.b_stop.pack(fill="x", side="top", padx=10, pady=6)
+        self.b_stop.pack(fill="x", side="top", before=self.body)
         self.deiconify(); self.lift(); win.lift(); win.focus_force()
         self._tick_indicators()
 

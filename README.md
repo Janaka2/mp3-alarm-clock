@@ -60,31 +60,17 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 ## Using it
 
-```
-┌ Alarms ──────────────────────────────────────────────────────────────────┐
-│ On  Next ring          Repeat    Label     Sound           Output      Vol│
-│ ✔   Thu 24 Sep 07:00   weekdays  Work      wakeup.mp3      Speakers    80 │
-│ ✔   Sat 26 Sep 09:30   once      Flight!   voice_2026-…    Headset     100│
-├ Alarm details ───────────────────────────────────────────────────────────┤
-│ Label [Work        ]   Repeat (•) Once ( ) Every day ( ) Weekdays        │
-│ Date  [2026]-[09]-[24] [Today][Tomorrow]   Time [07]:[00] [+1 min][+10]  │
-│ Sound [~/Music/wakeup.mp3                 ] [Browse…] [▶ Test] [■ Stop]  │
-│ Volume ────────●──────── 80 %         Ring for up to [10] min            │
-│ Play on [Mac mini Speakers        ▾] [↻]                                 │
-│ Record voice [Built-in Microphone ▾] [● Record] ▮▮▮▮▯▯▯ 00:04            │
-│ [Add alarm] [Clear form]                                                 │
-├ Sleep / power ───────────────────────────────────────────────────────────┤
-│ [x] Keep computer awake while an alarm is armed                          │
-│ [x] Schedule a system wake before the next alarm (asks for password)     │
-│ [x] When ringing, set the system output volume to [80] %  Snooze [5] min │
-│ ● Armed – next ring in 8h 12m   ● Keeping computer awake   ● OS wake registered for Thu 06:59 │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+The window has two halves. **Left:** your alarms (with the next ring time) and, tucked away, *More options*. **Right:** one alarm, in three numbered steps:
 
-1. **Sound** — `Browse…` for a file, or choose a microphone, press `● Record`, speak, press `■ Stop`. The recording is saved to `recordings/` and selected automatically. Pick the **output device** in *Play on*; `▶ Test` plays at the slider volume on that device.
-2. **When** — date, time, repeat. `+1 min` is handy to try a sound for real.
-3. **Add alarm.** The list shows the next ring time and the status bar counts down.
-4. **When it rings** a window pops on top with a big **STOP** and **Snooze**; the main window shows a red STOP bar too; volume fades in.
+| Step | What you do |
+|---|---|
+| ① **When** | Pick the time with the big hour / minute fields, choose *Just once*, *Every day* or *Weekdays*. The date only appears for one-time alarms. *In 1 min* / *In 10 min* are there to try a sound for real. |
+| ② **Sound** | *Choose a file…* or *🎤 Record my voice* (the level meter shows you're being heard). *▶ Preview* plays it at the slider volume. |
+| ③ **Where** | Which speaker should ring: built-in, headset, HDMI, or on a Mac any AirPlay speaker such as a HomePod. |
+
+Press **Save alarm**. The header shows a big clock, the next alarm with a countdown, and three plain-language status pills: *alarm set*, *computer will stay awake*, *will wake from sleep at …*.
+
+**When it rings**, a dark full-window alert pops on top with the time, the alarm name, a big red **STOP** and a **Snooze** button (Enter or Esc also stop it); the main window shows a red STOP bar as well, and the volume fades in.
 
 ## How sleep & wake work
 
@@ -99,7 +85,7 @@ The indicator row always says what is true *right now*. If the password prompt i
 
 ## AirPlay speakers (macOS)
 
-Open the *Play on* list and choose **AirPlay speakers…** (or press ↻) — the app asks the Music app for the AirPlay devices it can see and lists them as `AirPlay: LivingRoom (HomePod)`. Pick one and save the alarm. At ring time the app launches Music (it pre-launches it 3 minutes early), routes Music to that speaker, plays your file, fades the volume in, and when you press STOP it removes the temporary track and restores Music's previous speaker selection and volume.
+In step ③ open the list and choose **AirPlay speakers…** (or press ↻) — the app asks the Music app for the AirPlay devices it can see and lists them as `AirPlay: LivingRoom (HomePod)`. Pick one and save the alarm. At ring time the app launches Music (it pre-launches it 3 minutes early), routes Music to that speaker, plays your file, fades the volume in, and when you press STOP it removes the temporary track and restores Music's previous speaker selection and volume.
 
 - The first time, macOS asks whether the launcher (Terminal, or the standalone app) may control **Music** — click *Allow*. If you clicked *Don't Allow*, turn it on in *System Settings → Privacy & Security → Automation*.
 - Offline speaker at ring time → the alarm rings on the Mac's default output and the form says why.

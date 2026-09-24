@@ -21,6 +21,14 @@ The product is judged on details people feel every morning, not on the framework
 8. **Ring timeout** (`ring_minutes`) so a forgotten alarm doesn't play forever; log when it times out.
 9. **Missed alarms** (overdue longer than `GRACE`) are reported once in plain language and disabled – never silently dropped.
 
+## Visual system (since the 2026-09-24 redesign)
+- ttk theme `clam` + `App.PALETTE` tokens (navy header `#1F2A44`, page `#F3F5F9`, white cards, accent blue `#3A6FF0`, good/warn/bad greens-oranges-reds) and `App.F` fonts (Helvetica Neue / Segoe UI, 13 pt base, 46 pt clock). Never hard-code a colour in a widget; add a token.
+- Layout: header (title, next-alarm line, three status **pills**, big clock) → two columns: left = *Your alarms* card + collapsed *More options*; right = editor card with numbered steps ① When ② Sound ③ Where → *Save alarm*. The editor column is packed first (`side="right"`) so it keeps its natural width; the list column flexes.
+- Plain words everywhere: "Just once / Every day / Weekdays", "Choose a file…", "Record my voice", "Preview", "Plays on". Technical settings (caffeinate, pmset, system volume) live only under *More options* with a one-line muted explanation.
+- Pills use `_set_pill(label, text, tone)`; tone ∈ good / warn / bad / ring / neutral. Text starts with ● △ ○ 🔔 so state is readable without colour.
+- Buttons: `Accent.TButton` for the one primary action per card, `Soft.TButton` for the rest, `Danger.TButton` for delete, `Stop.TButton` (big red) only for stopping a ring. All are ttk so colours render on macOS too (plain `tk.Button` ignores `bg` there).
+- Verify layout numerically when screenshots aren't possible: instantiate `App`, pump `update()`, and compare `winfo_reqwidth()` with `winfo_width()` for every mapped widget (see the session's geometry check); nothing except the Treeview may request more than it gets, at both the default and the minimum window size.
+
 ## Interaction details
 - Selecting a row loads it into the form; the Save button label switches between "Add alarm" and "Save changes". Don't introduce a modal editor.
 - Double-click a row = enable/disable toggle.
