@@ -42,6 +42,13 @@ The product is judged on details people feel every morning, not on the framework
 - Does a brand-new alarm still work with zero edits?
 - Did an error path fall back to a stack trace instead of a sentence? (see [[plain-language-errors]])
 
+## Sound from a link (since 2026-09-25)
+- Third source next to "Choose a file…" and "Record my voice": **🔗 Use a link…**. In the alarm editor the link row (Link · entry · Get the sound · Cancel) *replaces* the button row while open, and progress / errors go to `l_rec` – the editor column must not grow (it already fills 1400x840 exactly; `brow` stays ≈ 540 px). To make room, "▶ Preview" turns into "■ Stop" while a preview plays (`_sync_preview_button`, refreshed by `_tick_status`) instead of a separate Stop button.
+- In the event editor it is state D of `_event_sound_ui` (`ev_link_open`), with the hint line reporting progress; Done refuses while a fetch runs, Cancel / another schedule / closing the app abort it.
+- Feedback while fetching: "Looking up the YouTube link… → Downloading from YouTube… 42 % → Converting to MP3…", then the title replaces the file name with "YouTube · 3:32" underneath and the status line says what to do next (Preview, Save). Failures are one sentence in red on the same line, the row stays open so the link can be corrected.
+- The clipboard is pre-filled into the Link field when it holds a web address. Enter = Get the sound.
+- Lists show "🔗 title"; a lost file says "saved copy missing – use the link again" and the ring-time error names the site and title.
+
 ## Two play modes (since 2026-09-24)
 - `alarm["mode"]`: `alarm` = loop the file until STOP / snooze / `ring_minutes` timeout (classic). `play` = play the file once from start to end (long talks, 2-hour sermons, albums) and stop by itself; no timeout, no snooze, window not topmost, no focus stealing, elapsed-time counter, `_watch_once` polls `player.is_playing()` (pygame) or Music every 5 s in a worker thread (AirPlay) and posts `("finished", aid, None)`.
 - Keep-awake must also hold while anything is playing (`_apply_power`: armed **or** ring_windows), otherwise a long file is cut by idle sleep.

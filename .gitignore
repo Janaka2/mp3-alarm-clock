@@ -16,3 +16,4 @@ recordings/*
 # OS noise
 .DS_Store
 Thumbs.db
+links/

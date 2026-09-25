@@ -18,6 +18,7 @@ python3 -m py_compile alarm_clock.py
 3. Click "+1 min" → "Add alarm" → list shows it, status bar shows "in 59s", indicators show Armed + Keeping awake; if "Schedule a system wake" is on, no password prompt should appear for an alarm < 60 s away.
 4. Wait: ring window pops on top, main window shows the red STOP bar, volume fades in. Snooze → re-rings after N min. STOP → everything quiet, indicators back to "No alarm armed".
 5. Close with an alarm armed → warning dialog.
+6. Sound step → 🔗 Use a link… → paste `https://www.youtube.com/watch?v=jNQXAC9IVRw` (19 s) → Get the sound: the status line walks through *Looking up → Downloading → Converting*, the title "Me at the zoo" replaces the file name with "YouTube · 0:19" under it, ▶ Preview plays it, `links/youtube_jNQXAC9IVRw.mp3` exists. Paste a playlist link → one red sentence, row stays open. (Needs the internet; skip and say so when offline.)
 
 ## 3. Sleep / wake (manual, per OS – see [[power-management]])
 - Set an alarm 4 min out, confirm "OS wake registered", sleep the machine (Apple menu → Sleep / Start → Sleep). It must wake ≈ 1 min early and ring.

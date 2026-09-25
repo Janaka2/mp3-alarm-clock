@@ -38,7 +38,7 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 | | |
 |---|---|
 | 👨‍👩‍👧 **Family schedules** | Named schedules (“Son — School day”, “Family — Evening”) with **timed events**, each with its own **recorded message** or audio file. Repeat days, one speaker and one volume per schedule. **Today** shows the whole day; **Skip today** pauses one event or a whole schedule for today only |
-| 🎵 **Any sound** | MP3, WAV, OGG, FLAC, AIFF (and M4A where the system can decode it) — pick a file, or **record from the microphone** and use the recording as the alarm. Quiet mics are **auto-boosted** to a healthy level, and the app warns while recording if the chosen mic is picking up nothing |
+| 🎵 **Any sound** | MP3, WAV, OGG, FLAC, AIFF (and M4A where the system can decode it) — pick a file, **record from the microphone**, or paste a **YouTube / SoundCloud link**: the sound is saved next to the app once and plays offline from then on. Quiet mics are **auto-boosted** to a healthy level, and the app warns while recording if the chosen mic is picking up nothing |
 | 📅 **Real scheduling** | Date + time (24 h), repeat **once / every day / weekdays**, unlimited alarms |
 | ▶ **Long recordings** | Each alarm either **rings until you stop it** (looping, with a give-up timeout) or **plays the whole file once** — a two-hour talk or a full album starts on time, keeps the computer awake while it plays, and stops by itself at the end |
 | 🔊 **Volume you control** | Per-alarm volume, **fade-in** over N seconds, optional "turn the system volume up" when ringing |
@@ -61,16 +61,17 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 4. [Schedules: messages for the family](#4-schedules-messages-for-the-family)
 5. [Set an alarm in three steps](#5-set-an-alarm-in-three-steps)
 6. [Record your own voice](#6-record-your-own-voice)
-7. [Play a whole file once (talks, albums)](#7-play-a-whole-file-once-talks-albums)
-8. [When the alarm rings](#8-when-the-alarm-rings)
-9. [Manage your alarms](#9-manage-your-alarms)
-10. [More options](#10-more-options)
-11. [What the status pills mean](#11-what-the-status-pills-mean)
-12. [Sleep, wake-up and missed alarms](#12-sleep-wake-up-and-missed-alarms)
-13. [AirPlay speakers (macOS)](#13-airplay-speakers-macos)
-14. [Where your data lives](#14-where-your-data-lives)
-15. [Troubleshooting](#15-troubleshooting)
-16. [Questions people ask](#16-questions-people-ask)
+7. [Use a YouTube or SoundCloud link](#7-use-a-youtube-or-soundcloud-link)
+8. [Play a whole file once (talks, albums)](#8-play-a-whole-file-once-talks-albums)
+9. [When the alarm rings](#9-when-the-alarm-rings)
+10. [Manage your alarms](#10-manage-your-alarms)
+11. [More options](#11-more-options)
+12. [What the status pills mean](#12-what-the-status-pills-mean)
+13. [Sleep, wake-up and missed alarms](#13-sleep-wake-up-and-missed-alarms)
+14. [AirPlay speakers (macOS)](#14-airplay-speakers-macos)
+15. [Where your data lives](#15-where-your-data-lives)
+16. [Troubleshooting](#16-troubleshooting)
+17. [Questions people ask](#17-questions-people-ask)
 
 ## 1. Install and start
 
@@ -82,7 +83,7 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 | Windows | `Start Alarm Clock.bat` | [Python 3](https://www.python.org/downloads/windows/) with *Add to PATH* ticked during installation |
 | Linux | `start_alarm_clock.sh` | `python3 python3-venv python3-tk libportaudio2` |
 
-**The first run takes about a minute.** The launcher creates a private `.venv` folder next to the app and downloads the two libraries it needs (`pygame-ce` for playback, `sounddevice` for the microphone). A terminal window shows *First run: setting up…* while this happens. Every run after that opens instantly. If the environment ever breaks (for example after a Python upgrade), the launcher notices and rebuilds it by itself.
+**The first run takes about a minute.** The launcher creates a private `.venv` folder next to the app and downloads the libraries it needs (`pygame-ce` for playback, `sounddevice` for the microphone, `yt-dlp`, `imageio-ffmpeg` and `certifi` for YouTube / SoundCloud links — `imageio-ffmpeg` is about 25 MB because it brings its own audio converter). A terminal window shows *First run: setting up…* while this happens. Every run after that opens instantly (about once a week it spends a few seconds refreshing the link downloader, and skips that when offline). If the environment ever breaks (for example after a Python upgrade), the launcher notices and rebuilds it by itself.
 
 - **macOS:** the first time, right-click `Start Alarm Clock.command` → **Open** if macOS says it is from an unidentified developer. If you get *"Python 3 with Tk is required"*, install Python from python.org (the Homebrew build often has no Tk).
 - **Windows:** if a black window flashes and closes, Python is probably not on the PATH. Re-run the Python installer and tick *Add python.exe to PATH*.
@@ -115,11 +116,11 @@ The app opens on **Today**, which is empty, with one button: **Create your first
 
 | Area | What it shows |
 |---|---|
-| **Header, left** | The name of the next alarm, when it rings and a live countdown. Below it, three **status pills** that always tell the truth about *right now*: is an alarm set, will the computer stay awake, will it wake from sleep (see [section 11](#11-what-the-status-pills-mean)). |
+| **Header, left** | The name of the next alarm, when it rings and a live countdown. Below it, three **status pills** that always tell the truth about *right now*: is an alarm set, will the computer stay awake, will it wake from sleep (see [section 12](#12-what-the-status-pills-mean)). |
 | **Header, right** | A big clock with the date and seconds, so you can check the computer's time is right. |
 | **Today · Schedules · Alarms** | The three views, in the row under the header. **Today** is the day's plan, **Schedules** is where family routines are made, **Alarms** is the classic alarm editor described in sections 5 to 10. |
 | **Your alarms** (left card, Alarms view) | Every alarm with its time, name, repeat rule, **next ring** time, sound file and output device. A filled dot ● means on, a hollow dot ○ means off. Below the list: *Turn on / off*, *Delete* and *Ring it now (test)*. |
-| **More options** (under the list) | Collapsed by default. Sleep and wake settings, system volume, snooze length and fade-in (see [section 10](#10-more-options)). |
+| **More options** (under the list) | Collapsed by default. Sleep and wake settings, system volume, snooze length and fade-in (see [section 11](#11-more-options)). |
 | **Editor** (right card, Alarms view) | One alarm at a time, in three numbered steps: ① When ② Sound ③ Where, then **Save alarm**. |
 | **Footer** | Where your alarms and recordings are stored. |
 
@@ -180,7 +181,7 @@ The list on the left shows each schedule with its days, speaker and number of ev
 Press **＋ Add event**. The event editor replaces the event list:
 
 - **Time** and **Activity** ("Breakfast"). **On** lets you pause one event without deleting it.
-- **Message:** three choices — **🎤 Record my voice**, **Choose audio file…**, or leave it with *No sound* (the event still appears in Today, nothing plays). After choosing, the friendly name is shown with **▶ Preview** and **Remove sound**; recording or choosing again replaces it.
+- **Message:** four choices — **🎤 Record my voice**, **Choose audio file…**, **🔗 Use a link…** (a YouTube video or SoundCloud track, saved once on this computer — see [section 7](#7-use-a-youtube-or-soundcloud-link)), or leave it with *No sound* (the event still appears in Today, nothing plays). After choosing, the friendly name is shown with **▶ Preview** and **Remove sound**; recording or choosing again replaces it.
 - **Done** puts the event in the list. **Cancel** leaves the previously saved event and its sound exactly as they were.
 - Events are validated as you go: an empty name or an impossible time shows a short note next to the field, and the schedule cannot be saved with an empty name or no repeat day.
 
@@ -228,13 +229,14 @@ Press **＋ New alarm** (or just use the form that is already there), fill in th
 - **Try it quickly:** **In 1 min** and **In 10 min** set the date and time relative to now. Use them to hear an alarm for real, exactly as it will ring (fade-in, system volume, chosen speaker).
 - **At that time:** what should happen when the moment comes.
   - **Ring until I stop it** — the usual alarm. The sound loops until you press STOP or Snooze. *If nobody stops it, give up after N minutes* (1–120, default 10) so a forgotten alarm does not play all day.
-  - **Play the whole file once** — for long recordings; see [section 7](#7-play-a-whole-file-once-talks-albums).
+  - **Play the whole file once** — for long recordings; see [section 8](#8-play-a-whole-file-once-talks-albums).
 
 ### ② Sound
 
 - **Choose a file…** opens a normal file dialog. Supported: MP3, WAV, OGG, FLAC, AIFF (M4A if your system can decode it). The file name and its folder appear above the buttons. If the file is later moved or deleted the label says *file not found* and the alarm will show an error when it is due, so keep alarm sounds in a fixed place (the `recordings` folder next to the app is a good one).
 - **🎤 Record my voice** records a message from the microphone; see [section 6](#6-record-your-own-voice).
-- **▶ Preview** plays the chosen sound once, at the slider volume, on the speaker chosen in step ③ — with no fade-in, so you hear the real level. **■ Stop** stops it.
+- **🔗 Use a link…** saves the sound of a YouTube video or SoundCloud track; see [section 7](#7-use-a-youtube-or-soundcloud-link).
+- **▶ Preview** plays the chosen sound once, at the slider volume, on the speaker chosen in step ③ — with no fade-in, so you hear the real level. While it plays the button reads **■ Stop**.
 - **Microphone** — which input to record from; **↻** refreshes the list after plugging one in. The bar to the right is the level meter that moves while you record.
 - **Volume** — the alarm's own volume, 0–100 %. It is applied on top of the system volume (see *More options* for forcing the system volume up as well).
 
@@ -244,7 +246,7 @@ Press **＋ New alarm** (or just use the form that is already there), fill in th
 
 - **System default output** follows whatever the computer is using at that moment (the safe choice).
 - Every connected output is listed by name: built-in speakers, a headset, HDMI, USB speakers, a Bluetooth box. **↻** refreshes the list.
-- On a Mac, **AirPlay speakers** such as HomePods are listed too; see [section 13](#13-airplay-speakers-macos).
+- On a Mac, **AirPlay speakers** such as HomePods are listed too; see [section 14](#14-airplay-speakers-macos).
 - If the chosen device is unplugged when the alarm is due, the alarm rings on the system default instead and the editor says so. In the editor, such a device is shown as *(not connected)* until you plug it back in.
 
 ### Save
@@ -272,7 +274,28 @@ While recording, if nothing is coming in for two seconds the line turns red: *ve
 
 **Microphone permission on macOS.** The first recording makes macOS ask whether the app may use the microphone. The question is addressed to the program that started the alarm clock: *Terminal* when you use `Start Alarm Clock.command`, or *Alarm Clock* itself when built standalone. If you clicked *Don't Allow*, or a recording comes out silent, open *System Settings → Privacy & Security → Microphone* and switch it on.
 
-## 7. Play a whole file once (talks, albums)
+## 7. Use a YouTube or SoundCloud link
+
+Wake up to a song, a chant, a sermon or a podcast episode that lives on YouTube or SoundCloud. The app saves **only the sound** on this computer, once, so the alarm plays even when the internet is down at 6 am. Nothing is streamed at alarm time.
+
+<p align="center"><img src="docs/screenshots/link-row.png" width="640" alt="The Sound step with a YouTube link pasted and the download in progress"></p>
+
+1. In step ② press **🔗 Use a link…**. The buttons make room for a **Link** field; if a link is already on the clipboard it is filled in for you.
+2. Paste the address of **one** video or track (`https://www.youtube.com/watch?v=…`, `https://youtu.be/…`, `https://soundcloud.com/artist/track`) and press **Get the sound** (or Enter).
+3. The line below reports progress: *Looking up the YouTube link… → Downloading from YouTube… 42 % → Converting to MP3…*. A song takes a few seconds; an hour-long talk a minute or so. **Cancel** stops it.
+4. When it is done the sound's **title** appears where the file name normally is, with the site and the length underneath (*YouTube · 3:32*). Press **▶ Preview** to hear it, then **Save alarm**.
+
+<p align="center"><img src="docs/screenshots/link-saved.png" width="640" alt="The Sound step showing the saved title, site and length"></p>
+
+- The same works for a schedule event: in the event editor press **🔗 Use a link…**, get the sound, then **Done** and **Save schedule**.
+- Saved sounds are kept in the `links/` folder next to the app as MP3, one file per video or track, and reused: using the same link in another alarm or event takes a second and needs no download.
+- Both alarm modes work: **Ring until I stop it** loops the sound; **Play the whole file once** plays a two-hour talk from start to end ([section 8](#8-play-a-whole-file-once-talks-albums)).
+- Playlists, channels and live streams are refused with a sentence that says so — paste the link of one video or track. Anything longer than 12 hours is refused too.
+- In the lists the sound shows as *🔗 title*. If the saved file is ever deleted, the editor says *saved copy missing – use the link again* and the alarm reports the same when it is due.
+- YouTube changes its site often. The launcher refreshes the link downloader (`yt-dlp`) about once a week; if a link that used to work fails with *"the link downloader is out of date"*, quit and start the app again, then retry.
+- Please use it for what you are allowed to listen to: your own uploads, public tracks and content whose terms permit personal offline use.
+
+## 8. Play a whole file once (talks, albums)
 
 Some things are not meant to loop: a two-hour talk, a sermon, a guided meditation, an album to fall asleep to. For those, in step ① choose **Play the whole file once**.
 
@@ -285,7 +308,7 @@ Some things are not meant to loop: a two-hour talk, a sermon, a guided meditatio
 
 <p align="center"><img src="docs/screenshots/now-playing.png" width="520" alt="The Now playing card with elapsed time and a STOP button"></p>
 
-## 8. When the alarm rings
+## 9. When the alarm rings
 
 <p align="center"><img src="docs/screenshots/main-ringing.png" alt="Main window while ringing: red Ringing now pill and a full-width STOP ALARM bar"></p>
 
@@ -309,7 +332,7 @@ The snooze is temporary; it is not saved as a new alarm and it does not change t
 
 **One-time alarms** switch themselves off after ringing (the dot in the list turns hollow and *Next ring* shows *Off*). Repeating alarms stay on.
 
-## 9. Manage your alarms
+## 10. Manage your alarms
 
 The list on the left shows every alarm, sorted so the next one to ring is at the top; switched-off alarms sit at the bottom in grey.
 
@@ -324,7 +347,7 @@ The list on the left shows every alarm, sorted so the next one to ring is at the
 
 The *Next ring* column, the header countdown and the *Alarm set* pill always agree; they are all computed from the same schedule.
 
-## 10. More options
+## 11. More options
 
 Press **▸ More options (sleep, snooze, fade-in)** under the alarm list to open this panel. Changes are saved immediately; there is no OK button.
 
@@ -333,12 +356,12 @@ Press **▸ More options (sleep, snooze, fade-in)** under the alarm list to open
 | Setting | Default | What it does |
 |---|---|---|
 | **Keep my computer awake while an alarm is set** | on | Stops the computer from going to sleep on its own while any alarm is armed or a file is playing. Needs no password. The screen may still dim or lock; that is fine, the alarm rings anyway. |
-| **Wake my computer from sleep for alarms** | on | If you (or the lid) put the computer to sleep anyway, the app asks the operating system to wake it **one minute before** the next alarm. On macOS this needs your password once each time the next alarm changes; see [section 12](#12-sleep-wake-up-and-missed-alarms). |
+| **Wake my computer from sleep for alarms** | on | If you (or the lid) put the computer to sleep anyway, the app asks the operating system to wake it **one minute before** the next alarm. On macOS this needs your password once each time the next alarm changes; see [section 13](#13-sleep-wake-up-and-missed-alarms). |
 | **Turn the system volume up to N % when an alarm rings** | on (macOS), off elsewhere | Sets the computer's master volume to N (Windows: raises it) and un-mutes it just before ringing, so an alarm cannot be silenced by a volume knob you forgot about. Not used for AirPlay speakers (they have their own volume). |
 | **Snooze for N minutes** | 5 | Length of one snooze. 1–60. |
 | **Fade the sound in over N seconds** | 20 | Ramp from silent to the alarm volume. 0 turns fading off (instant full volume). 0–120. Preview never fades. |
 
-## 11. What the status pills mean
+## 12. What the status pills mean
 
 The three pills in the header describe the situation *right now*. Green ● is good, orange △ is a warning, red is a problem, grey ○ is "nothing to do".
 
@@ -351,7 +374,7 @@ The three pills in the header describe the situation *right now*. Green ● is g
 | **🔔 Ringing now** / **▶ Playing now** | An alarm is ringing, or a whole-file alarm is playing. |
 | **● Computer will stay awake** | The keep-awake guard is active. |
 | **△ Computer may fall asleep (option is off)** | An alarm is set but *Keep my computer awake* is switched off. If the computer sleeps, the alarm only rings if a wake-up is registered. |
-| **△ Computer may fall asleep while playing (option is off)** | A whole-file alarm ([section 7](#7-play-a-whole-file-once-talks-albums)) is playing but *Keep my computer awake* is off, so idle sleep could cut it short. |
+| **△ Computer may fall asleep while playing (option is off)** | A whole-file alarm ([section 8](#8-play-a-whole-file-once-talks-albums)) is playing but *Keep my computer awake* is off, so idle sleep could cut it short. |
 | **△ Could not keep the computer awake** | The guard failed (details in `alarmclock.log`). |
 | **○ Not keeping the computer awake** | No alarm is set, so nothing to guard. |
 | **● Will wake from sleep at 06:29** | The operating system has accepted the wake request (one minute before the alarm). |
@@ -365,7 +388,7 @@ The three pills in the header describe the situation *right now*. Green ● is g
 
 ![Header when the password prompt was declined: orange pill and a Try again button](docs/screenshots/header-wake-declined.png)
 
-## 12. Sleep, wake-up and missed alarms
+## 13. Sleep, wake-up and missed alarms
 
 **The app must be running.** Alarms ring only while the window is open (it can be behind other windows or on another desktop). Closing it with an alarm armed asks *Quit anyway?* first.
 
@@ -384,7 +407,7 @@ The three pills in the header describe the situation *right now*. Green ● is g
 
 **Check the clock.** The header shows the computer's time and seconds; an alarm can only be as accurate as that.
 
-## 13. AirPlay speakers (macOS)
+## 14. AirPlay speakers (macOS)
 
 In step ③ open the list and choose an **AirPlay: …** entry, or **AirPlay speakers… (select to load them from Music)** if none are listed yet (or press ↻). The app asks the Music app for the AirPlay devices it can see and lists them as `AirPlay: Living Room (HomePod)`. Pick one and save the alarm.
 
@@ -396,7 +419,7 @@ At ring time the app launches Music (it pre-launches it 3 minutes early), routes
 - **Preview** also plays through the AirPlay speaker, so you can test the whole chain.
 - Windows / Linux: AirPlay entries are simply not offered.
 
-## 14. Where your data lives
+## 15. Where your data lives
 
 Everything is stored **next to the app**, never in your home folder:
 
@@ -405,14 +428,15 @@ Everything is stored **next to the app**, never in your home folder:
 | `alarms.json` | Your alarms, schedules, today's skips, the last week of message history and the settings from More options. Plain text (schema version 2); you can back it up or copy it to another machine. |
 | `alarms.json.backup-v1` | Created once when a file from the previous version is upgraded — your alarms before schedules existed. |
 | `recordings/` | Voice recordings (`voice_2026-09-24_06-15-02.wav`). Also the default folder in *Choose a file…*. |
+| `links/` | Sounds saved from YouTube / SoundCloud links (`youtube_jNQXAC9IVRw.mp3`), one per video or track, reused across alarms. Delete a file here to free space; the alarm will ask for the link again. |
 | `alarmclock.log` | What happened and when: alarms due, snoozes, missed alarms, wake requests, errors. Look here first when something is unclear. |
-| `.venv/` | The private Python environment the launcher created. Safe to delete; it is rebuilt on the next start. |
+| `.venv/` | The private Python environment the launcher created (with its own copy of ffmpeg for link conversion). Safe to delete; it is rebuilt on the next start. |
 
 If the file cannot be read (for example after a bad manual edit), the app starts empty, keeps the original as `alarms.json.broken-<date>` and tells you so; it never overwrites it.
 
-**Moving to another computer:** copy the whole folder. Alarms whose sound files live *inside* the folder (recordings) keep working; alarms pointing to files elsewhere on the old machine will say *file not found* until you choose the file again.
+**Moving to another computer:** copy the whole folder. Alarms whose sound files live *inside* the folder (recordings, link sounds) keep working; alarms pointing to files elsewhere on the old machine will say *file not found* until you choose the file again.
 
-## 15. Troubleshooting
+## 16. Troubleshooting
 
 | Problem | What to do |
 |---|---|
@@ -428,17 +452,21 @@ If the file cannot be read (for example after a bad manual edit), the app starts
 | **"That date and time is already in the past"** | A one-time alarm needs a future moment. Use **Tomorrow** or **In 1 min**. |
 | **"The sound file for … is missing"** | The file was moved or deleted. Click the alarm, *Choose a file…* again, save. |
 | **"… could not play <file>"** (when ringing) or **"Could not play <file>"** (Preview) | The file is damaged or in a format the player cannot decode. Convert it to MP3 or WAV. |
+| **"That link could not be opened"** / **"private or has been removed"** | Check the address in a browser: it must be one public video or track, not a playlist, channel or live stream. |
+| **"The internet connection is not working"** (Use a link…) | The lookup needs the internet once; connect and press *Get the sound* again. Saved sounds keep working offline. |
+| **"YouTube is blocking the download … or the link downloader is out of date"** | Quit and start the app again — the launcher refreshes `yt-dlp` — then retry. Developers: `.venv/bin/python -m pip install -U yt-dlp`. |
+| **"The sound was downloaded but could not be converted"** | The converter (ffmpeg, bundled with `imageio-ffmpeg`) failed. Delete the `.venv` folder and start again; on macOS the app falls back to the system converter. |
 | **AirPlay speaker not listed** | Make sure it is on and on the same Wi-Fi, then press ↻ next to the list. The Music app must be allowed to be controlled (*Privacy & Security → Automation*). |
 | **The password dialog keeps coming back** | It appears once per change of the next alarm or message time. Editing several alarms in a row, or a schedule with many messages, triggers it each time; finish editing first, or turn *Wake my computer from sleep* off (the keep-awake guard still works without it). |
 | **A message shows *Missed* although the computer was on** | Its schedule was saved or turned on after the time had passed today (the note says so), or another sound kept it waiting for more than two minutes. Tomorrow it plays normally. |
 | **Two messages were due at the same time and only one played at once** | That is by design: one plays after the other. If the second one would start more than two minutes late it is marked *Missed*. |
 | **Something else** | Open `alarmclock.log` next to the app; every alarm, snooze, wake request and error is written there with a timestamp. |
 
-## 16. Questions people ask
+## 17. Questions people ask
 
 **Can I close the window and still get the alarm?** No. The app must stay open (minimised or behind other windows is fine). It warns you if you try to quit with an alarm set.
 
-**Does it need the internet?** Only for the first run, to download the two libraries. After that it works offline.
+**Does it need the internet?** For the first run (to download the libraries) and at the moment you press *Get the sound* for a YouTube / SoundCloud link. Alarms themselves never need it: link sounds are saved on this computer.
 
 **Does it work with the screen locked?** Yes. The alarm rings and the alert appears when you unlock. Enter or Esc stops it as soon as the alert has focus.
 
@@ -446,7 +474,7 @@ If the file cannot be read (for example after a bad manual edit), the app starts
 
 **How loud will it be?** The alarm's own volume slider, multiplied by the system volume. Turn on *Turn the system volume up to N %* to make the system part predictable.
 
-**Is anything sent anywhere?** No. There is no account, no telemetry; everything stays in the folder.
+**Is anything sent anywhere?** No. There is no account, no telemetry; everything stays in the folder. The only outgoing traffic is the link download you ask for, and the weekly `yt-dlp` refresh from PyPI.
 
 **Can I edit alarms.json by hand?** Yes, while the app is closed. It is ordinary JSON.
 
@@ -460,16 +488,18 @@ If the file cannot be read (for example after a bad manual edit), the app starts
 
 ```
 alarm_clock.py              the whole app (core logic + tkinter GUI, ~3 000 lines)
-requirements.txt            pygame-ce, sounddevice — that's all
+requirements.txt            pygame-ce, sounddevice, yt-dlp, imageio-ffmpeg, certifi — that's all
 Start Alarm Clock.command   macOS launcher      Start Alarm Clock.bat   Windows launcher
 start_alarm_clock.sh        Linux launcher      build_standalone.sh     PyInstaller build
-tests/test_logic.py         headless tests for alarm scheduling (next_fire, grace, snooze, missed)
+tests/test_logic.py         headless tests for alarm scheduling (next_fire, grace, snooze, missed) and link helpers
 tests/test_schedules.py     headless tests for schedules (days, skip/undo, lateness, DST gap, migration, duplicate, queue)
 tools/make_screenshots.py   regenerates docs/screenshots/*.png from a throw-away sample alarms.json
 .claude/                    Claude Code skills + proactive review agents used to build this
 ```
 
 **Why pygame-ce and not pygame?** pygame 2.6 has no wheels for Python 3.14; pip silently builds it from source *without* the audio mixer. pygame-ce ships wheels for every current Python on all three platforms.
+
+**Why imageio-ffmpeg?** YouTube serves audio as AAC or Opus, which the pygame mixer cannot decode, so every link is converted to MP3 once. `imageio-ffmpeg` is a pip wheel that contains a static ffmpeg for macOS (Intel and Apple silicon), Windows and Linux — no separate install, no PATH fiddling. An ffmpeg on the PATH is used if the wheel is missing; on macOS `afconvert` is the last resort.
 
 ## Development
 

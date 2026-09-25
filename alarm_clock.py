@@ -4,14 +4,16 @@ Alarm Clock
 ===========
 Schedule MP3 (or your own voice recording) alarms with a simple desktop GUI.
 
-* Pick any MP3 / WAV / OGG / FLAC file, or record a voice message from the mic.
+* Pick any MP3 / WAV / OGG / FLAC file, record a voice message from the mic, or paste a
+  YouTube / SoundCloud link (only the sound is saved next to the app, so it plays offline).
 * Set date + time, repeat (once / daily / weekdays), volume and ring duration.
 * Keeps the computer awake while an alarm is armed, and (optionally) schedules a
   real system wake so the alarm still fires if the machine was put to sleep.
 * Everything (alarms.json, recordings/, alarmclock.log) lives next to this file,
   so the whole folder is portable.
 
-Runs on macOS, Windows and Linux.  Requires: pygame, sounddevice (see requirements.txt).
+Runs on macOS, Windows and Linux.  Requires: pygame-ce, sounddevice, yt-dlp, imageio-ffmpeg
+(see requirements.txt).
 """
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ import wave
 from array import array
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
+from urllib.parse import urlparse
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
@@ -70,6 +73,7 @@ def _base_dir() -> str:
 BASE_DIR = _base_dir()
 DATA_FILE = os.path.join(BASE_DIR, "alarms.json")
 REC_DIR = os.path.join(BASE_DIR, "recordings")
+LINK_DIR = os.path.join(BASE_DIR, "links")        # sound saved from YouTube / SoundCloud links, one file per video or track
 LOG_FILE = os.path.join(BASE_DIR, "alarmclock.log")
 
 
@@ -97,6 +101,7 @@ DEFAULT_SETTINGS = {
     "last_repeat": "once",
     "last_output": "",           # "" = system default output device
     "last_mode": "alarm",        # alarm = ring (loop) until stopped | play = play the whole file once
+    "last_link": None,           # {url, title, site, duration} when last_sound came from a web link
 }
 
 
@@ -109,7 +114,7 @@ def new_alarm(settings: dict | None = None) -> dict:
     s = settings or DEFAULT_SETTINGS
     when = next_round_hour()
     last_sound = s.get("last_sound") or ""
-    return {
+    a = {
         "id": uuid.uuid4().hex,
         "label": "Alarm",
         "date": when.date().isoformat(),
@@ -123,6 +128,9 @@ def new_alarm(settings: dict | None = None) -> dict:
         "enabled": True,
         "last_fired": None,
     }
+    if a["sound"] and s.get("last_link"):
+        a["link"] = dict(s["last_link"])         # {url, title, site, duration}: where the sound came from
+    return a
 
 
 def alarm_time(a: dict) -> dtime:
@@ -483,7 +491,9 @@ class AnnouncementQueue:
                 continue
             path = resolve_sound(occ["event"].get("sound", ""))
             if not path or not os.path.isfile(path):
-                store.record(occ["key"], "failed", "sound file is missing")
+                lk = occ["event"].get("link")
+                store.record(occ["key"], "failed", f"the sound saved from {lk.get('site', 'the link')} is missing – open the event and use the link again"
+                             if lk else "sound file is missing")
                 log(f"routine message '{occ['event']['label']}' failed: sound file missing ({path})")
                 continue
             occ["path"] = path
@@ -880,6 +890,314 @@ class Recorder:
 
 
 # --------------------------------------------------------------------------- power / sleep handling
+# --------------------------------------------------------------------------- links (YouTube / SoundCloud)
+LINK_MAX_HOURS = 12                    # longer than this is refused: it would take ages and fill the disk
+
+
+def is_link(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t.startswith(("http://", "https://", "www.", "youtu.be/", "youtube.com/", "m.youtube.com/", "soundcloud.com/"))
+
+
+def clean_link(text: str) -> str:
+    """Trim and add https:// when someone pasted 'youtu.be/…' or 'www.…' without a scheme."""
+    t = (text or "").strip()
+    if t and not t.lower().startswith(("http://", "https://")):
+        t = "https://" + t
+    return t
+
+
+def valid_link(text: str) -> str:
+    """The cleaned link when it looks like a real web address (host with a dot, no spaces), else ''."""
+    url = clean_link(text)
+    try:
+        host = urlparse(url).netloc
+    except ValueError:
+        return ""
+    if not url.lower().startswith(("http://", "https://")) or " " in url or "." not in host or any(c.isspace() for c in host):
+        return ""
+    return url
+
+
+def link_site(url: str) -> str:
+    """'YouTube', 'SoundCloud' or the site name – used in every sentence about the link."""
+    try:
+        host = (urlparse(url).netloc or "").lower()
+    except ValueError:
+        host = ""
+    if "youtu" in host:
+        return "YouTube"
+    if "soundcloud" in host:
+        return "SoundCloud"
+    host = host.removeprefix("www.")
+    return host or "the web"
+
+
+def link_stem(info: dict) -> str:
+    """File name (no extension) for a fetched video / track: site + its id, safe on every file system."""
+    site = str(info.get("extractor_key") or info.get("extractor") or "link").lower().split(":")[0]
+    vid = str(info.get("id") or "")
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in f"{site}_{vid}")
+    return safe[:80] or "link"
+
+
+def check_link_info(info: dict) -> str:
+    """'' when this video / track can be saved, otherwise one sentence saying why not."""
+    if info.get("_type") in ("playlist", "multi_video") or ("entries" in info and not info.get("formats")):
+        return "That link is a whole playlist or channel. Paste the link of one video or track instead."
+    if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming", "post_live"):
+        return "That is a live stream, which cannot be saved. Choose a normal video or track."
+    dur = info.get("duration") or 0
+    if dur > LINK_MAX_HOURS * 3600:
+        return f"That is longer than {LINK_MAX_HOURS} hours. Choose something shorter."
+    return ""
+
+
+def explain_link_error(text: str, site: str) -> str:
+    """Turn a yt-dlp error into what happened / why / what to do (details stay in the log)."""
+    t = text.lower()
+    if "unsupported url" in t or "is not a valid url" in t:
+        if site not in ("YouTube", "SoundCloud"):
+            return "That link could not be opened. Paste the address of one YouTube video or SoundCloud track and try again."
+        return f"That link could not be opened. Check that it is the address of one {site} video or track and try again."
+    if any(k in t for k in ("urlopen error", "network is unreachable", "temporary failure", "timed out",
+                            "getaddrinfo", "connection reset", "connection refused", "no address associated")):
+        return "The internet connection is not working. Check it and try again."
+    if any(k in t for k in ("private", "unavailable", "has been removed", "not available", "404", "does not exist",
+                            "no longer", "not found")):
+        return f"That video or track is private or has been removed from {site}, so it cannot be saved. Choose another one."
+    if "sign in" in t or "login" in t or "age" in t or "cookies" in t or "premium" in t:
+        return f"{site} only lets a signed-in account listen to that, so it cannot be saved. Choose something public."
+    if "requested format is not available" in t:
+        return "No sound could be found for that link. Try another video or track."
+    if any(k in t for k in ("unable to extract", "please report", "not a bot", "confirm you", "http error 403")):
+        return (f"{site} is blocking the download right now, or the link downloader is out of date. "
+                "Quit and start the app again (it updates the downloader), then try once more.")
+    return f"The sound could not be saved from {site}. Check the link and try again."
+
+
+def fmt_duration(seconds) -> str:
+    try:
+        s = int(seconds or 0)
+    except (TypeError, ValueError):
+        s = 0
+    h, r = divmod(s, 3600)
+    m, s = divmod(r, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def sound_title(item: dict) -> str:
+    """Short name of an alarm's / event's sound for lists: link title, '🎤 Recording', or the file name."""
+    path = resolve_sound(item.get("sound", ""))
+    if not path:
+        return "No sound"
+    if not os.path.isfile(path):
+        return "Missing file"
+    if item.get("link"):
+        title = item["link"].get("title") or link_site(item["link"].get("url", ""))
+        return "🔗 " + (title if len(title) <= 60 else title[:59] + "…")
+    if path.startswith(REC_DIR):
+        return "🎤 Recording"
+    return os.path.basename(path)
+
+
+class _QuietLogger:
+    """yt-dlp is chatty; keep only warnings and errors, and put them in alarmclock.log."""
+    def debug(self, msg): pass
+    def info(self, msg): pass
+    def warning(self, msg): log(f"yt-dlp: {msg}")
+    def error(self, msg): log(f"yt-dlp: {msg}")
+
+
+class LinkCancelled(Exception):
+    pass
+
+
+class LinkFetcher:
+    """Saves the sound of a YouTube / SoundCloud page as an MP3 in links/, in a worker thread.
+
+    Progress and the result reach the GUI through App.events as ("link", owner, payload) with
+    payload["state"] = progress | ready | failed.  Only one fetch runs at a time; starting another
+    cancels the running one.  A video / track already in links/ is reused without downloading.
+    Nothing is ever streamed at alarm time – the alarm plays the saved file, so it works offline.
+    """
+
+    FORMAT = "bestaudio[ext=mp3][protocol^=http]/bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio/best"
+
+    def __init__(self, events: queue.Queue):
+        self.events = events
+        self.job = 0
+        self._cancel = threading.Event()
+        self._proc: subprocess.Popen | None = None
+        self._thread: threading.Thread | None = None
+
+    @property
+    def busy(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @staticmethod
+    def ffmpeg_path() -> str:
+        """The bundled ffmpeg (imageio-ffmpeg wheel) first, then one on PATH; '' if there is none."""
+        try:
+            import imageio_ffmpeg
+            p = imageio_ffmpeg.get_ffmpeg_exe()
+            if p and os.path.isfile(p):
+                return p
+        except Exception as e:
+            log(f"bundled ffmpeg not available: {e}")
+        return shutil.which("ffmpeg") or ""
+
+    @staticmethod
+    def js_runtimes() -> dict:
+        """YouTube needs a JavaScript runtime for some formats; use whichever one is installed."""
+        found = {name: {} for name in ("deno", "node", "bun") if shutil.which(name)}
+        return found or {"deno": {}}
+
+    @staticmethod
+    def cached(stem: str) -> str:
+        for ext in (".mp3", ".wav"):
+            p = os.path.join(LINK_DIR, stem + ext)
+            if os.path.isfile(p) and os.path.getsize(p) > 0:
+                return p
+        return ""
+
+    def start(self, url: str, owner: str) -> int:
+        """Begin fetching `url` for `owner` ('alarm' or 'event').  Returns the job number to match events."""
+        self.cancel()
+        self.job += 1
+        job, self._cancel = self.job, threading.Event()
+        self._thread = threading.Thread(target=self._run, args=(job, url, owner, self._cancel), daemon=True)
+        self._thread.start()
+        return job
+
+    def cancel(self) -> None:
+        self._cancel.set()
+        p = self._proc
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except OSError:
+                pass
+
+    def _run(self, job: int, url: str, owner: str, cancel: threading.Event) -> None:
+        def post(state: str, **kw) -> None:
+            if not cancel.is_set():
+                self.events.put(("link", owner, dict(job=job, state=state, **kw)))
+        site = link_site(url)
+        tmp = os.path.join(LINK_DIR, "incoming")
+        try:
+            os.makedirs(tmp, exist_ok=True)
+            self._fetch(job, url, site, tmp, cancel, post)
+        except LinkCancelled:
+            log(f"link fetch cancelled: {url}")
+        except Exception as e:
+            text = str(e)
+            log(f"link fetch failed for {url}: {text}")
+            if type(e).__name__ == "DownloadCancelled":
+                pass
+            elif type(e).__name__ in ("DownloadError", "ExtractorError", "UnsupportedError"):
+                post("failed", text=explain_link_error(text, site))
+            elif isinstance(e, RuntimeError):
+                post("failed", text=text)
+            else:
+                post("failed", text=f"The sound could not be saved from {site}.\n\nDetails: {text}")
+        finally:
+            for f in os.listdir(tmp) if os.path.isdir(tmp) else []:
+                if f.startswith(f"job{job}."):
+                    try:
+                        os.remove(os.path.join(tmp, f))
+                    except OSError:
+                        pass
+
+    def _fetch(self, job: int, url: str, site: str, tmp: str, cancel: threading.Event, post) -> None:
+        post("progress", text=f"Looking up the {site} link…")
+        try:
+            import yt_dlp
+        except ImportError as e:
+            log(f"yt-dlp missing: {e}")
+            raise RuntimeError("The link downloader is not installed. Delete the .venv folder next to the app "
+                               "and start it again to reinstall it.")
+        last = [0.0]
+
+        def hook(d: dict) -> None:
+            if cancel.is_set():
+                raise LinkCancelled()
+            if d.get("status") == "downloading" and time.monotonic() - last[0] > 0.5:
+                last[0] = time.monotonic()
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                done = d.get("downloaded_bytes") or 0
+                post("progress", text=(f"Downloading from {site}… {min(99, int(done * 100 / total))} %" if total
+                                       else f"Downloading from {site}… {done / 1e6:.1f} MB"))
+
+        opts = {"quiet": True, "noprogress": True, "noplaylist": True, "extract_flat": "in_playlist", "playlist_items": "1",
+                "cachedir": False, "logger": _QuietLogger(), "progress_hooks": [hook], "format": self.FORMAT,
+                "outtmpl": os.path.join(tmp, f"job{job}.%(ext)s"), "overwrites": True,
+                "js_runtimes": self.js_runtimes(), "socket_timeout": 20, "retries": 3}
+        with yt_dlp.YoutubeDL(opts) as y:
+            info = y.extract_info(url, download=False)
+            if cancel.is_set():
+                raise LinkCancelled()
+            why = check_link_info(info)
+            if why:
+                post("failed", text=why)
+                return
+            meta = dict(url=info.get("webpage_url") or url, title=info.get("title") or url, site=site,
+                        duration=int(info.get("duration") or 0))
+            stem = link_stem(info)
+            hit = self.cached(stem)
+            if hit:
+                log(f"link already saved, reusing {os.path.basename(hit)}: {meta['url']}")
+                post("ready", path=hit, **meta)
+                return
+            post("progress", text=f"Downloading from {site}…")
+            y.process_ie_result(info, download=True)
+        raw = next((os.path.join(tmp, f) for f in os.listdir(tmp)
+                    if f.startswith(f"job{job}.") and not f.endswith((".part", ".ytdl"))), "")
+        if cancel.is_set():
+            raise LinkCancelled()
+        if not raw:
+            raise RuntimeError(f"The download from {site} did not produce a file. Try again in a moment.")
+        if raw.lower().endswith(".mp3"):
+            final = os.path.join(LINK_DIR, stem + ".mp3")
+            os.replace(raw, final)
+        else:
+            post("progress", text="Converting to MP3…")
+            final = self._convert(raw, stem, cancel)
+        log(f"link saved as {os.path.basename(final)} ({fmt_duration(meta['duration'])}): {meta['url']}")
+        post("ready", path=final, **meta)
+
+    def _convert(self, raw: str, stem: str, cancel: threading.Event) -> str:
+        ff = self.ffmpeg_path()
+        if ff:
+            out = os.path.join(LINK_DIR, stem + ".mp3")
+            cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", raw, "-vn",
+                   "-codec:a", "libmp3lame", "-q:a", "4", out]
+        elif IS_MAC:                                   # afconvert ships with macOS but cannot write MP3
+            out = os.path.join(LINK_DIR, stem + ".wav")
+            cmd = ["afconvert", "-f", "WAVE", "-d", "LEI16", raw, out]
+        else:
+            raise RuntimeError("The audio converter (ffmpeg) is missing, so this link cannot be saved. Delete the "
+                               ".venv folder next to the app and start it again to reinstall it.")
+        kw = {"creationflags": 0x08000000} if IS_WIN else {}     # CREATE_NO_WINDOW
+        self._proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                      stderr=subprocess.PIPE, **kw)
+        _, err = self._proc.communicate()
+        rc = self._proc.returncode
+        self._proc = None
+        if cancel.is_set():
+            try:
+                os.remove(out)
+            except OSError:
+                pass
+            raise LinkCancelled()
+        if rc != 0 or not os.path.isfile(out) or os.path.getsize(out) == 0:
+            detail = err.decode(errors="replace").strip()[-300:]
+            log(f"conversion failed ({rc}) for {raw}: {detail}")
+            raise RuntimeError("The sound was downloaded but could not be converted to a playable format. "
+                               f"Try another video or track.\n\nDetails: {detail or 'converter returned ' + str(rc)}")
+        return out
+
+
 class PowerManager:
     """
     Two independent jobs:
@@ -1252,6 +1570,12 @@ class App(tk.Tk):
         self.ev_draft: dict | None = None         # event being edited inside the schedule draft
         self.ev_take = ""                         # a recording made for the event but not used yet
         self._rec_owner = ""                      # "event" or "alarm": which editor started the current recording
+        self.links = LinkFetcher(self.events)     # YouTube / SoundCloud → links/*.mp3 in a worker thread
+        self._link_job = {"alarm": 0, "event": 0}  # running fetch per editor (0 = none); stale results are ignored
+        self.form_link: dict | None = None        # {url, title, site, duration} behind the alarm form's sound
+        self._link_path = ""                      # the file that form_link describes
+        self.ev_link_open = False                 # the event editor is showing the link row
+        self.link_open = False                    # the alarm editor is showing the link row
         self._today_expanded = False
         self._saved_job: str | None = None
 
@@ -1553,14 +1877,27 @@ class App(tk.Tk):
         self.v_sound.trace_add("write", lambda *_: self._on_sound_change())
         brow = ttk.Frame(snd, style="Card.TFrame")
         brow.pack(fill="x", pady=(8, 0))
+        self.brow = brow
         ttk.Button(brow, text="Choose a file…", style="Soft.TButton", command=self._browse).pack(side="left")
         self.b_rec = ttk.Button(brow, text="🎤  Record my voice", style="Soft.TButton", command=self._toggle_record)
         self.b_rec.pack(side="left", padx=8)
-        self.b_test = ttk.Button(brow, text="▶  Preview", style="Soft.TButton", command=self._test_play)
+        ttk.Button(brow, text="🔗  Use a link…", style="Soft.TButton", command=self._link_open).pack(side="left", padx=(0, 8))
+        self.b_test = ttk.Button(brow, text="▶  Preview", style="Soft.TButton", command=self._test_play, width=11)
         self.b_test.pack(side="left")
-        ttk.Button(brow, text="■  Stop", style="Soft.TButton", command=self._stop_all).pack(side="left", padx=8)
+        self._preview_shown = False                   # b_test reads "■  Stop" while a preview is playing
+        # the link row appears under the buttons only after "Use a link…" (see _link_open)
+        self.link_row = ttk.Frame(snd, style="Card.TFrame")       # takes the button row's place while open
+        ttk.Label(self.link_row, text="Link", style="Muted.TLabel").pack(side="left", padx=(2, 8))
+        self.v_link = tk.StringVar()
+        self.e_link = ttk.Entry(self.link_row, textvariable=self.v_link, width=30, font=F["small"])
+        self.e_link.pack(side="left")
+        self.e_link.bind("<Return>", lambda e: self._link_fetch())
+        self.b_link_get = ttk.Button(self.link_row, text="Get the sound", style="Soft.TButton", command=self._link_fetch)
+        self.b_link_get.pack(side="left", padx=8)
+        ttk.Button(self.link_row, text="Cancel", style="Soft.TButton", command=self._link_close).pack(side="left")
         mrow = ttk.Frame(snd, style="Card.TFrame")
         mrow.pack(fill="x", pady=(8, 0))
+        self.mrow = mrow
         ttk.Label(mrow, text="Microphone", style="Muted.TLabel").pack(side="left", padx=(2, 8))
         self.devices = Recorder.input_devices()
         self.v_mic = tk.StringVar(value=self.devices[0][1] if self.devices else "No microphone found")
@@ -1570,7 +1907,7 @@ class App(tk.Tk):
         ttk.Button(mrow, text="↻", style="Icon.TButton", command=self._refresh_mics).pack(side="left", padx=(4, 12))
         self.meter = ttk.Progressbar(mrow, length=110, maximum=100, style="Meter.Horizontal.TProgressbar")
         self.meter.pack(side="left")
-        self.l_rec = ttk.Label(snd, text="", style="Muted.TLabel")
+        self.l_rec = ttk.Label(snd, text="", style="Muted.TLabel", wraplength=520, justify="left")
         self.l_rec.pack(anchor="w", padx=(2, 0), pady=(4, 0))
         vrow = ttk.Frame(snd, style="Card.TFrame")
         vrow.pack(fill="x", pady=(12, 0))
@@ -1740,14 +2077,7 @@ class App(tk.Tk):
                 key = occurrence_key(sc["id"], ev["id"], today)
                 occ = self.store.occurrences.get(key)
                 path = resolve_sound(ev.get("sound", ""))
-                if not path:
-                    sound = "No sound"
-                elif not os.path.isfile(path):
-                    sound = "Missing file"
-                elif path.startswith(REC_DIR):
-                    sound = "🎤 Recording"
-                else:
-                    sound = os.path.basename(path)
+                sound = sound_title(ev)
                 skipped = sched_skipped or self.store.is_skipped(today, sc["id"], ev["id"])
                 if occ:                                   # what really happened always wins
                     status = self.STATUS_TEXT.get(occ["status"], occ["status"])
@@ -1779,7 +2109,7 @@ class App(tk.Tk):
             else:
                 continue
             rows.append(dict(iid="alarm:" + a["id"], kind="alarm", dt=dt, time=f"{dt:%H:%M}", label=a["label"], sched="Alarm",
-                             sid=None, eid=a["id"], sound=os.path.basename(a["sound"]), output=output_label(a.get("output", "")),
+                             sid=None, eid=a["id"], sound=sound_title(a), output=output_label(a.get("output", "")),
                              status=status, skipped=False, note="", path=a["sound"], volume=a["volume"], out=a.get("output", "")))
         rows.sort(key=lambda r: (r["dt"], r["sched"], r["label"]))
         return rows
@@ -2084,6 +2414,7 @@ class App(tk.Tk):
         self.b_ev_rec = ttk.Button(pick, text="🎤  Record my voice", style="Soft.TButton", command=self._ev_record_start)
         self.b_ev_rec.pack(side="left")
         ttk.Button(pick, text="Choose audio file…", style="Soft.TButton", command=self._event_choose_file).pack(side="left", padx=8)
+        ttk.Button(pick, text="🔗  Use a link…", style="Soft.TButton", command=self._ev_link_open).pack(side="left")
         ttk.Label(pick, text="Microphone", style="Muted.TLabel").pack(side="left", padx=(16, 6))
         self.cb_ev_mic = ttk.Combobox(pick, textvariable=self.v_mic, state="readonly", width=22, values=[d[1] for d in self.devices], font=F["small"])
         self.cb_ev_mic.pack(side="left")
@@ -2095,6 +2426,16 @@ class App(tk.Tk):
         self.ev_meter.pack(side="left", padx=12)
         ttk.Button(self.ev_rec_row, text="■  Stop recording", style="Danger.TButton", command=self._ev_record_stop).pack(side="left")
         ttk.Button(self.ev_rec_row, text="Cancel", style="Soft.TButton", command=self._ev_record_cancel).pack(side="left", padx=8)
+        # state D: a YouTube / SoundCloud link being typed or fetched
+        self.ev_link_row = ttk.Frame(snd, style="Card.TFrame")
+        ttk.Label(self.ev_link_row, text="Link", style="Muted.TLabel").pack(side="left", padx=(2, 8))
+        self.v_ev_link = tk.StringVar()
+        self.e_ev_link = ttk.Entry(self.ev_link_row, textvariable=self.v_ev_link, width=34, font=F["small"])
+        self.e_ev_link.pack(side="left")
+        self.e_ev_link.bind("<Return>", lambda e: self._ev_link_fetch())
+        self.b_ev_link_get = ttk.Button(self.ev_link_row, text="Get the sound", style="Soft.TButton", command=self._ev_link_fetch)
+        self.b_ev_link_get.pack(side="left", padx=8)
+        ttk.Button(self.ev_link_row, text="Cancel", style="Soft.TButton", command=self._ev_link_close).pack(side="left")
         # state C: a take waiting for a decision
         self.ev_take_row = ttk.Frame(snd, style="Card.TFrame")
         self.l_ev_take = ttk.Label(self.ev_take_row, text="", style="Card.TLabel", wraplength=560, justify="left")
@@ -2146,6 +2487,14 @@ class App(tk.Tk):
         if not p:
             self.l_sound_name.config(text="No sound chosen yet")
             self.l_sound_path.config(text="")
+            return
+        if self.form_link and p != self._link_path:
+            self.form_link = None                     # a file or recording replaced the link
+        if self.form_link:
+            title = self.form_link.get("title") or "Sound from a link"
+            self.l_sound_name.config(text=title if len(title) <= 48 else title[:47] + "…")
+            self.l_sound_path.config(text=f"{self.form_link.get('site', 'link')} · {fmt_duration(self.form_link.get('duration'))}"
+                                     if os.path.isfile(p) else "saved copy missing – use the link again")
             return
         folder = os.path.dirname(p).replace(os.path.expanduser("~"), "~")
         if len(folder) > 48:
@@ -2253,6 +2602,9 @@ class App(tk.Tk):
         h, m = a["time"].split(":")
         self.v_hour.set(h); self.v_min.set(m)
         self.v_repeat.set(a["repeat"])
+        self._link_close()
+        self.form_link = dict(a["link"]) if a.get("link") else None
+        self._link_path = a["sound"] if self.form_link else ""
         self.v_sound.set(a["sound"])
         self._set_output(a.get("output", ""))
         self.v_volume.set(a["volume"])
@@ -2278,8 +2630,23 @@ class App(tk.Tk):
                                  "hours are 0–23 and minutes 0–59.")
             return None
         sound = self.v_sound.get().strip()
+        if self._link_job["alarm"]:
+            self.l_rec.config(text="The sound is still being fetched from the link. Wait for it to finish, or press Cancel next to the link.",
+                              foreground=self.PALETTE["bad"])
+            return None
+        if self.link_open and self.v_link.get().strip():
+            self.l_rec.config(text="You pasted a link but have not fetched it yet. Press “Get the sound”, or Cancel to keep the current sound.",
+                              foreground=self.PALETTE["bad"])
+            self.e_link.focus_set()
+            return None
+        if self.link_open:
+            self._link_close()
+        if sound and self.form_link and not os.path.isfile(sound):
+            messagebox.showerror(APP_NAME, f"The sound from {self.form_link.get('site', 'the link')} is not on this computer any more.\n\n"
+                                 "Press “Use a link…” and get it again, then save.")
+            return None
         if not sound or not os.path.isfile(sound):
-            messagebox.showerror(APP_NAME, "Step ② is missing: choose a sound file or record your voice first.")
+            messagebox.showerror(APP_NAME, "Step ② is missing: choose a sound file, record your voice or use a link first.")
             return None
         a = self.store.get(self.editing_id) if self.editing_id else None
         a = dict(a) if a else new_alarm()
@@ -2296,6 +2663,10 @@ class App(tk.Tk):
             "enabled": True,
             "last_fired": None,
         })
+        if self.form_link and sound == self._link_path:
+            a["link"] = dict(self.form_link)
+        else:
+            a.pop("link", None)
         when = next_fire(a, datetime.now())
         if a["repeat"] == "once" and (when is None or when < datetime.now()):
             messagebox.showerror(APP_NAME, "That date and time is already in the past.")
@@ -2314,7 +2685,7 @@ class App(tk.Tk):
         # remember what the user chose so the next new alarm starts from it
         self.store.settings.update({"last_sound": a["sound"], "last_volume": a["volume"],
                                     "last_repeat": a["repeat"], "last_output": a.get("output", ""),
-                                    "last_mode": a.get("mode", "alarm")})
+                                    "last_mode": a.get("mode", "alarm"), "last_link": a.get("link")})
         self.store.upsert(a)
         self.scheduler.ringing.discard(a["id"])
         self._refresh_list(select=a["id"])
@@ -2370,6 +2741,97 @@ class App(tk.Tk):
         if p:
             self.v_sound.set(p)
 
+    # ----- sound from a YouTube / SoundCloud link (alarm editor)
+    def _clipboard_link(self) -> str:
+        try:
+            t = self.clipboard_get().strip()
+        except tk.TclError:
+            return ""
+        return valid_link(t) if is_link(t) and len(t) < 500 else ""
+
+    LINK_HELP = ("Paste a YouTube or SoundCloud link. Only the sound is saved on this computer, "
+                 "so the alarm works later without internet.")
+
+    BAD_LINK = ("That does not look like a web link. It should start with https:// – "
+                "for example https://www.youtube.com/watch?v=…")
+
+    def _link_open(self) -> None:
+        if self.recorder.recording and self._rec_owner == "alarm":
+            self.l_rec.config(text="Stop the recording first.", foreground="")
+            return
+        if self.link_open:
+            self.e_link.focus_set()
+            return
+        self.link_open = True
+        self.brow.pack_forget()
+        self.link_row.pack(fill="x", pady=(8, 0), before=self.mrow)
+        clip = self._clipboard_link()
+        if clip and not self.v_link.get().strip():
+            self.v_link.set(clip)
+        self.l_rec.config(text=self.LINK_HELP, foreground="")
+        self.e_link.focus_set()
+        self.e_link.select_range(0, "end")
+
+    def _link_close(self) -> None:
+        if self._link_job["alarm"]:
+            self.links.cancel()
+            self._link_job["alarm"] = 0
+            self.b_link_get.config(state="normal")
+            self.l_rec.config(text="", foreground="")
+        if self.link_open:
+            self.link_open = False
+            self.link_row.pack_forget()
+            self.brow.pack(fill="x", pady=(8, 0), before=self.mrow)
+            if self.l_rec.cget("text") == self.LINK_HELP:
+                self.l_rec.config(text="")
+
+    def _link_fetch(self) -> None:
+        url = valid_link(self.v_link.get())
+        if not url:
+            self.l_rec.config(text=self.BAD_LINK, foreground=self.PALETTE["bad"])
+            return
+        self._link_job["alarm"] = self.links.start(url, "alarm")
+        self.b_link_get.config(state="disabled")
+        self.l_rec.config(text=f"Looking up the {link_site(url)} link…", foreground="")
+
+    def _on_link_event(self, owner: str, p: dict) -> None:
+        """A LinkFetcher result for the alarm editor or the event editor (stale jobs are ignored)."""
+        if p.get("job") != self._link_job.get(owner):
+            return
+        if owner == "alarm":
+            if p["state"] == "progress":
+                self.l_rec.config(text=p["text"], foreground="")
+                return
+            self._link_job["alarm"] = 0
+            self.b_link_get.config(state="normal")
+            if p["state"] == "failed":
+                self.l_rec.config(text=p["text"], foreground=self.PALETTE["bad"])
+                return
+            self.form_link = {k: p[k] for k in ("url", "title", "site", "duration")}
+            self._link_path = p["path"]
+            self.v_sound.set(p["path"])
+            self._link_close()
+            self.l_rec.config(text=f"Saved the sound of “{p['title']}” from {p['site']}. Press Preview to hear it, then save the alarm.",
+                              foreground="")
+            return
+        if self.ev_draft is None:
+            self._link_job["event"] = 0
+            self.b_ev_link_get.config(state="normal")
+            return
+        if p["state"] == "progress":
+            self.l_ev_hint.config(text=p["text"], style="Muted.TLabel")
+            return
+        self._link_job["event"] = 0
+        self.b_ev_link_get.config(state="normal")
+        if p["state"] == "failed":
+            self.l_ev_hint.config(text=p["text"], style="Bad.TLabel")
+            return
+        self.ev_draft["sound"] = portable_sound(p["path"])
+        self.ev_draft["link"] = {k: p[k] for k in ("url", "title", "site", "duration")}
+        self.ev_link_open = False
+        self._event_sound_ui()
+        self.l_ev_hint.config(text=f"Saved the sound of “{p['title']}” from {p['site']}. Press Done, then Save schedule.", style="Muted.TLabel")
+
     def _test_play(self) -> None:
         p = self.v_sound.get().strip()
         if not p or not os.path.isfile(p):
@@ -2385,8 +2847,14 @@ class App(tk.Tk):
         try:
             warning = self.player.play(p, self.v_volume.get(), loop=False, device=out)
             self.l_form_hint.config(text=warning or f"Playing on {self._get_output() or 'system default output'}")
+            self._sync_preview_button()
         except Exception as e:
             log(f"test playback failed for {p}: {e}")
+            if self.form_link:
+                messagebox.showerror(APP_NAME, f"Could not play the sound saved from {self.form_link.get('site', 'the link')} "
+                                     f"(“{self.form_link.get('title', '')}”).\n\nThe saved copy may be damaged. Press “Use a link…” "
+                                     f"and get it again.\n\nDetails: {e}")
+                return
             messagebox.showerror(APP_NAME, f"Could not play {os.path.basename(p)}.\n\n"
                                  "The file may be damaged or in a format this app cannot decode. "
                                  "Try another file, or convert this one to MP3/WAV.\n\n"
@@ -2399,6 +2867,7 @@ class App(tk.Tk):
         self._stop_airplay()
         for aid in list(self.ring_windows):
             self._dismiss(aid)
+        self._sync_preview_button()
 
     def _on_volume(self) -> None:
         v = int(self.v_volume.get())
@@ -2512,7 +2981,7 @@ class App(tk.Tk):
             self.tree.insert("", "end", iid=a["id"], tags=("on" if a["enabled"] else "off",), values=(
                 "●" if a["enabled"] else "○", a["time"], a["label"], repeat_txt.get(a["repeat"], a["repeat"]),
                 "Playing now" if a["id"] in self.once_play else (f"{nf:%a %d %b %H:%M}" if nf else "Off"),
-                ("▶ " if a.get("mode") == "play" else "") + os.path.basename(a["sound"]), output_label(a.get("output", ""))))
+                ("▶ " if a.get("mode") == "play" else "") + sound_title(a), output_label(a.get("output", ""))))
         if select and self.tree.exists(select):
             self.tree.selection_set(select)
         if self.store.alarms:
@@ -2580,7 +3049,18 @@ class App(tk.Tk):
         else:
             self.b_stop_hdr.pack_forget()
 
+    def _sync_preview_button(self) -> None:
+        """▶ Preview becomes ■ Stop while anything plays on the local stream or AirPlay, and back."""
+        playing = self.player.is_playing() or bool(self.airplay and self.airplay.playing)
+        if playing != self._preview_shown:
+            self._preview_shown = playing
+            if playing:
+                self.b_test.config(text="■  Stop", command=self._stop_all)
+            else:
+                self.b_test.config(text="▶  Preview", command=self._test_play)
+
     def _tick_status(self) -> None:
+        self._sync_preview_button()
         ev = self.scheduler.next_event()
         now = datetime.now()
         self.l_clock.config(text=f"{now:%H:%M}")
@@ -2614,6 +3094,8 @@ class App(tk.Tk):
                     self._ring(a, when)
                 elif kind == "notice":
                     self.l_form_hint.config(text=when)
+                elif kind == "link":
+                    self._on_link_event(a, when)
                 elif kind == "announce":
                     self.announcements.push(a)
                     self._pump_announcements()
@@ -2666,7 +3148,11 @@ class App(tk.Tk):
             self.once_play[a["id"]] = {"via": "airplay" if use_airplay else "local", "t0": time.monotonic(),
                                        "started": False, "label": None}
         problem = ""
-        if not os.path.isfile(a["sound"]):
+        if not os.path.isfile(a["sound"]) and a.get("link"):
+            problem = (f"The sound for “{a['label']}” was saved from {a['link'].get('site', 'a link')} "
+                       f"(“{a['link'].get('title', '')}”), but the saved copy is missing:\n{a['sound']}\n\n"
+                       "Open the alarm, press “Use a link…” to get it again, and save.")
+        elif not os.path.isfile(a["sound"]):
             problem = (f"The sound file for “{a['label']}” is missing:\n{a['sound']}\n\n"
                        "It may have been moved or deleted. Choose another file below and save the alarm.")
         elif use_airplay:
@@ -2720,7 +3206,7 @@ class App(tk.Tk):
         sub.pack(pady=(2, 22))
         ttk.Button(win, text="■   STOP", style="Stop.TButton", command=lambda: self._dismiss(a["id"])).pack()
         if once:
-            sub.config(text=os.path.basename(a["sound"]))
+            sub.config(text=a["link"].get("title") or os.path.basename(a["sound"]) if a.get("link") else os.path.basename(a["sound"]))
             self.once_play[a["id"]]["label"] = tk.Label(win, text="0:00:00 played", font=F["base"], bg=P["header"], fg="#C7D0E4")
             self.once_play[a["id"]]["label"].pack(pady=(14, 0))
             tk.Label(win, text="Stops by itself when the file ends  ·  Enter or Esc also stops it",
@@ -2946,6 +3432,7 @@ class App(tk.Tk):
     def _sched_load(self, sc: dict) -> None:
         if self._ev_recording():
             self._ev_record_cancel()
+        self._ev_link_close(silent=True)
         self._ev_take_discard(silent=True)
         stored = self.store.get_schedule(sc["id"])
         self.sdraft = json.loads(json.dumps(sc))
@@ -3094,6 +3581,7 @@ class App(tk.Tk):
             return
         if self._ev_recording():
             self._ev_record_cancel()
+        self._ev_link_close(silent=True)
         self._ev_take_discard(silent=True)
         self.ev_draft = None
         self._sched_load(stored or new_schedule(self.store.settings))
@@ -3106,9 +3594,7 @@ class App(tk.Tk):
         keep = self.etree.selection()
         self.etree.delete(*self.etree.get_children())
         for ev in sorted(self.sdraft["events"], key=lambda e: e["time"]) if self.sdraft else []:
-            path = resolve_sound(ev.get("sound", ""))
-            snd = ("No sound" if not path else "Missing file" if not os.path.isfile(path)
-                   else "🎤 Recording" if path.startswith(REC_DIR) else os.path.basename(path))
+            snd = sound_title(ev)
             self.etree.insert("", "end", iid=ev["id"], tags=("on" if ev["enabled"] else "off",),
                               values=(ev["time"], ev["label"] or "(no name)", snd, "on" if ev["enabled"] else "off"))
         if keep and self.etree.exists(keep[0]):
@@ -3167,13 +3653,15 @@ class App(tk.Tk):
         return self.recorder.recording and self._rec_owner == "event"
 
     def _event_sound_ui(self) -> None:
-        """Show the right one of: chosen sound / recording in progress / a take waiting for a decision."""
-        for f in (self.ev_sound_row, self.ev_pick_row, self.ev_rec_row, self.ev_take_row):
+        """Show the right one of: chosen sound / recording in progress / a take waiting for a decision / link row."""
+        for f in (self.ev_sound_row, self.ev_pick_row, self.ev_rec_row, self.ev_take_row, self.ev_link_row):
             f.pack_forget()
         if self._ev_recording() and self.ev_draft is not None:
             self.ev_rec_row.pack(fill="x")
         elif self.ev_take:
             self.ev_take_row.pack(fill="x")
+        elif self.ev_link_open:
+            self.ev_link_row.pack(fill="x")
         else:
             self.ev_sound_row.pack(fill="x")
             self.ev_pick_row.pack(fill="x", pady=(8, 0))
@@ -3181,12 +3669,21 @@ class App(tk.Tk):
             self.b_ev_preview.pack_forget(); self.b_ev_remove.pack_forget()
             if not path:
                 self.l_ev_sound.config(text="No sound – the event is shown in Today but nothing plays", style="Card.TLabel")
+            elif not os.path.isfile(path) and self.ev_draft.get("link"):
+                lk = self.ev_draft["link"]
+                self.l_ev_sound.config(text=f"The sound from {lk.get('site', 'the link')} (“{lk.get('title', '')}”) is not on this computer any more. Press Use a link… to get it again.", style="Bad.TLabel")
+                self.b_ev_remove.pack(side="left", padx=(12, 0))
             elif not os.path.isfile(path):
                 self.l_ev_sound.config(text=f"{os.path.basename(path)} was not found – it may have been moved or deleted. Choose or record it again.", style="Bad.TLabel")
                 self.b_ev_remove.pack(side="left", padx=(12, 0))
             else:
-                kind = "Your recording" if path.startswith(REC_DIR) else "Audio file"
-                self.l_ev_sound.config(text=f"{kind}:  {os.path.basename(path)}", style="Card.TLabel")
+                if self.ev_draft.get("link"):
+                    lk = self.ev_draft["link"]
+                    text = f"{lk.get('site', 'Link')}:  {lk.get('title', '')}  ({fmt_duration(lk.get('duration'))})"
+                else:
+                    kind = "Your recording" if path.startswith(REC_DIR) else "Audio file"
+                    text = f"{kind}:  {os.path.basename(path)}"
+                self.l_ev_sound.config(text=text, style="Card.TLabel")
                 self.b_ev_preview.pack(side="left", padx=(12, 0))
                 self.b_ev_remove.pack(side="left", padx=8)
         self.l_ev_hint.pack_forget(); self.l_ev_hint.pack(anchor="w", pady=(6, 0))
@@ -3204,6 +3701,14 @@ class App(tk.Tk):
         if self.ev_take:
             self.l_ev_hint.config(text="Decide about the recording first: Use recording, Record again or Discard.")
             return False
+        if self._link_job["event"]:
+            self.l_ev_hint.config(text="The sound is still being fetched from the link. Wait for it, or press Cancel next to the link.", style="Bad.TLabel")
+            return False
+        if self.ev_link_open and self.v_ev_link.get().strip():
+            self.l_ev_hint.config(text="You pasted a link but have not fetched it yet. Press “Get the sound”, or Cancel to keep the current sound.", style="Bad.TLabel")
+            self.e_ev_link.focus_set()
+            return False
+        self.ev_link_open = False
         self._event_read_form()
         errs = validate_schedule({"name": "x", "days": [0], "events": [self.ev_draft]})
         msg = errs.get(f"event:{self.ev_draft['id']}", "")
@@ -3228,6 +3733,7 @@ class App(tk.Tk):
     def _event_cancel(self) -> None:
         if self._ev_recording():
             self._ev_record_cancel()
+        self._ev_link_close(silent=True)
         self._ev_take_discard(silent=True)
         self.ev_draft = None
         self._event_show_editor(False)
@@ -3247,6 +3753,7 @@ class App(tk.Tk):
             filetypes=[("Audio files", " ".join("*" + e for e in SUPPORTED_AUDIO)), ("All files", "*.*")])
         if p and self.ev_draft is not None:
             self.ev_draft["sound"] = portable_sound(p)
+            self.ev_draft.pop("link", None)
             self._event_sound_ui()
 
     def _event_preview(self) -> None:
@@ -3257,10 +3764,47 @@ class App(tk.Tk):
     def _event_remove_sound(self) -> None:
         if self.ev_draft is not None:
             self.ev_draft["sound"] = ""          # the file itself is never deleted here
+            self.ev_draft.pop("link", None)
             self._event_sound_ui()
+
+    # ----- sound from a YouTube / SoundCloud link (event editor)
+    def _ev_link_open(self) -> None:
+        if self.ev_draft is None or self._ev_recording() or self.ev_take:
+            return
+        self.ev_link_open = True
+        clip = self._clipboard_link()
+        if clip and not self.v_ev_link.get().strip():
+            self.v_ev_link.set(clip)
+        self._event_sound_ui()
+        self.l_ev_hint.config(text=self.LINK_HELP, style="Muted.TLabel")
+        self.e_ev_link.focus_set()
+        self.e_ev_link.select_range(0, "end")
+
+    def _ev_link_close(self, silent: bool = False) -> None:
+        if self._link_job["event"]:
+            self.links.cancel()
+            self._link_job["event"] = 0
+            self.b_ev_link_get.config(state="normal")
+        if not self.ev_link_open:
+            return
+        self.ev_link_open = False
+        if self.ev_draft is not None:
+            self._event_sound_ui()
+            if not silent:
+                self.l_ev_hint.config(text="", style="Muted.TLabel")
+
+    def _ev_link_fetch(self) -> None:
+        url = valid_link(self.v_ev_link.get())
+        if not url:
+            self.l_ev_hint.config(text=self.BAD_LINK, style="Bad.TLabel")
+            return
+        self._link_job["event"] = self.links.start(url, "event")
+        self.b_ev_link_get.config(state="disabled")
+        self.l_ev_hint.config(text=f"Looking up the {link_site(url)} link…", style="Muted.TLabel")
 
     # ----- recording a message for an event
     def _ev_record_start(self) -> None:
+        self._ev_link_close(silent=True)
         if self.recorder.recording:
             self.l_ev_hint.config(text="A recording is already running in the Alarms view. Stop it there first.")
             return
@@ -3334,6 +3878,7 @@ class App(tk.Tk):
     def _ev_take_use(self) -> None:
         if self.ev_take and self.ev_draft is not None:
             self.ev_draft["sound"] = portable_sound(self.ev_take)
+            self.ev_draft.pop("link", None)
             self.ev_take = ""
             self.l_ev_hint.config(text="Recording attached. Press Done, then Save schedule.")
             self._event_sound_ui()
@@ -3491,6 +4036,7 @@ class App(tk.Tk):
         for occ in self.announcements.cancel():
             self.store.record(occ["key"], "missed", "the app was closed before it played")
         self.scheduler.stop()
+        self.links.cancel()
         self.player.stop()
         if self.airplay and self.airplay.playing:
             self.airplay.stop()

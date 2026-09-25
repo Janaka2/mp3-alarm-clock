@@ -1,0 +1,2 @@
+# Windows reads batch files line by line; keep CRLF so goto/blocks behave on a GitHub zip download.
+*.bat text eol=crlf

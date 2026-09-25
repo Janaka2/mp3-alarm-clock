@@ -1,2 +1,5 @@
 pygame-ce>=2.5
 sounddevice>=0.5
+yt-dlp>=2025.9
+imageio-ffmpeg>=0.6
+certifi

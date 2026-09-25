@@ -40,6 +40,7 @@ SOUNDS = os.path.join(TMP, "Alarm sounds")
 ac.DATA_FILE = os.path.join(TMP, "alarms.json")
 ac.LOG_FILE = os.path.join(TMP, "alarmclock.log")
 ac.REC_DIR = os.path.join(TMP, "recordings")
+ac.LINK_DIR = os.path.join(TMP, "links")
 
 # Pretend the OS accepted the wake request instead of running pmset (no password prompt).
 ac.PowerManager._apply_wake = lambda self, old, new: self._set_wake_result(True, new)
@@ -282,6 +283,27 @@ def main() -> None:
     later(300, start_rec)
     later(3000, lambda: capture_widget(sound_frame, "recording.png", pad=8))
     later(100, stop_rec)
+
+    # 6b. a YouTube link being fetched, then the saved result (no network: the states are set directly)
+    def link_progress():
+        app._link_open()
+        app.v_link.set("https://www.youtube.com/watch?v=jNQXAC9IVRw")
+        app.b_link_get.config(state="disabled")
+        app.l_rec.config(text="Downloading from YouTube… 42 %", foreground="")
+    def link_saved():
+        os.makedirs(ac.LINK_DIR, exist_ok=True)
+        path = chime(os.path.join(ac.LINK_DIR, "youtube_jNQXAC9IVRw.mp3"))
+        app.b_link_get.config(state="normal")
+        app._on_link_event("alarm", dict(job=0, state="ready", path=path, url="https://www.youtube.com/watch?v=jNQXAC9IVRw",
+                                         title="Me at the zoo", site="YouTube", duration=19))
+    def link_reset():
+        app.l_rec.config(text="", foreground="")
+        app.tree.selection_set("a1")
+    later(300, link_progress)
+    later(600, lambda: capture_widget(sound_frame, "link-row.png", pad=8))
+    later(100, link_saved)
+    later(600, lambda: capture_widget(sound_frame, "link-saved.png", pad=8))
+    later(100, link_reset)
 
     # 7. header when the password prompt for the OS wake was declined ("Try again" appears)
     def decline():

@@ -1,6 +1,6 @@
 #!/bin/bash
 # macOS double-click launcher.  Creates a private virtual environment next to this
-# file on first run, installs the two dependencies, then starts the alarm clock.
+# file on first run, installs the dependencies, then starts the alarm clock.
 cd "$(dirname "$0")" || exit 1
 export PATH="/Library/Frameworks/Python.framework/Versions/Current/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
@@ -18,8 +18,8 @@ PY=$(find_python) || {
   exit 1
 }
 
-# (Re)create the environment if it is missing or its audio modules are broken.
-if ! ".venv/bin/python" -c 'import pygame.mixer, sounddevice' >/dev/null 2>&1; then
+# (Re)create the environment if it is missing or any of its modules are broken.
+if ! ".venv/bin/python" -c 'import pygame.mixer, sounddevice, yt_dlp, imageio_ffmpeg, certifi' >/dev/null 2>&1; then
   echo "First run: setting up (this takes about a minute)…"
   rm -rf .venv
   "$PY" -m venv .venv || exit 1
@@ -28,5 +28,16 @@ if ! ".venv/bin/python" -c 'import pygame.mixer, sounddevice' >/dev/null 2>&1; t
     osascript -e 'display alert "Could not install dependencies" message "Check your internet connection and try again. Details are in the Terminal window." as critical'
     exit 1
   }
+  touch .venv/.yt-dlp-updated
+fi
+
+# YouTube changes often and old link downloaders stop working: refresh yt-dlp about once a week.
+# Fails quietly when offline; the app still starts.
+# (pip exits 0 offline when the package is already installed, so also check it really reached the index.)
+if [ -z "$(find .venv -maxdepth 1 -name .yt-dlp-updated -mtime -7 2>/dev/null)" ]; then
+  if ".venv/bin/python" -m pip install --quiet --upgrade --timeout 10 --retries 1 yt-dlp > .venv/update.log 2>&1 \
+     && ! grep -q "Retrying\|connection broken" .venv/update.log; then
+    touch .venv/.yt-dlp-updated
+  fi
 fi
 exec ".venv/bin/python" alarm_clock.py

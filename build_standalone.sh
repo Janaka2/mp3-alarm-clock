@@ -6,7 +6,10 @@ cd "$(dirname "$0")"
 [ -x .venv/bin/python ] || python3 -m venv .venv
 PY=.venv/bin/python; [ -x "$PY" ] || PY=.venv/Scripts/python.exe
 "$PY" -m pip install -q -r requirements.txt pyinstaller
+# yt-dlp loads its site extractors lazily and imageio-ffmpeg ships the ffmpeg binary as package data,
+# so both must be collected whole or "Use a link…" fails inside the frozen app.
 "$PY" -m PyInstaller --noconfirm --clean --windowed --name "Alarm Clock" \
+  --collect-all yt_dlp --collect-all imageio_ffmpeg \
   --osx-bundle-identifier com.local.alarmclock alarm_clock.py
 if [ "$(uname)" = "Darwin" ]; then
   PLIST="dist/Alarm Clock.app/Contents/Info.plist"

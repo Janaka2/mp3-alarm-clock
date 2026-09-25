@@ -84,5 +84,45 @@ def test_scheduler():
     assert store.next_event() is None or store.next_event()[1]["id"] not in (o["id"], m["id"])
 
 
+def test_links():
+    """Web links (YouTube / SoundCloud): detection, wording and cache names – no network needed."""
+    assert ac.is_link("https://www.youtube.com/watch?v=abc") and ac.is_link("youtu.be/abc") and ac.is_link(" www.soundcloud.com/x ")
+    assert not ac.is_link("") and not ac.is_link("/Users/me/song.mp3") and not ac.is_link("wake up")
+    assert ac.clean_link(" youtu.be/abc ") == "https://youtu.be/abc"
+    assert ac.clean_link("https://x.y/z") == "https://x.y/z"
+    assert ac.valid_link(" youtu.be/abc ") == "https://youtu.be/abc"
+    assert ac.valid_link("not a link") == "" and ac.valid_link("https://nodot/x") == "" and ac.valid_link("") == ""
+    assert "unavailable" in "this video is unavailable" and "private or has been removed" in ac.explain_link_error("ERROR: [youtube] a: This video is unavailable", "YouTube")
+    assert ac.link_site("https://youtu.be/abc") == "YouTube"
+    assert ac.link_site("https://m.youtube.com/watch?v=1") == "YouTube"
+    assert ac.link_site("https://soundcloud.com/nasa/x") == "SoundCloud"
+    assert ac.link_site("https://www.example.org/a") == "example.org"
+    assert ac.link_stem({"extractor_key": "Youtube", "id": "jNQXAC9IVRw"}) == "youtube_jNQXAC9IVRw"
+    assert ac.link_stem({"extractor": "soundcloud:search", "id": "12/3 4"}) == "soundcloud_12_3_4"
+    assert ac.check_link_info({"_type": "playlist", "entries": []}).startswith("That link is a whole playlist")
+    assert ac.check_link_info({"is_live": True, "formats": [1]}).startswith("That is a live stream")
+    assert ac.check_link_info({"duration": 13 * 3600, "formats": [1]}).startswith("That is longer than")
+    assert ac.check_link_info({"duration": 120, "formats": [1], "title": "x"}) == ""
+    assert "internet connection" in ac.explain_link_error("ERROR: Unable to download webpage: <urlopen error [Errno 8]>", "YouTube")
+    assert "private or has been removed" in ac.explain_link_error("ERROR: [youtube] abc: Video unavailable", "YouTube")
+    assert "Paste the address of one YouTube video" in ac.explain_link_error("ERROR: Unsupported URL: https://x", "example.org")
+    assert "Check that it is the address" in ac.explain_link_error("ERROR: Unsupported URL: https://x", "YouTube")
+    assert "out of date" in ac.explain_link_error("ERROR: Unable to extract player; please report this issue", "YouTube")
+    assert ac.fmt_duration(19) == "0:19" and ac.fmt_duration(3725) == "1:02:05" and ac.fmt_duration(None) == "0:00"
+    # sound_title: link title wins over the file name, missing files are said so
+    tmp = tempfile.mkdtemp(); f = os.path.join(tmp, "youtube_x.mp3"); open(f, "wb").write(b"\0" * 10)
+    assert ac.sound_title({"sound": f, "link": {"title": "Morning raga", "url": "https://youtu.be/x"}}) == "🔗 Morning raga"
+    assert ac.sound_title({"sound": f}) == "youtube_x.mp3"
+    assert ac.sound_title({"sound": os.path.join(tmp, "gone.mp3"), "link": {"title": "t"}}) == "Missing file"
+    assert ac.sound_title({"sound": ""}) == "No sound"
+    # a new alarm remembers where the last sound came from
+    a = ac.new_alarm({"last_sound": f, "last_link": {"url": "https://youtu.be/x", "title": "Morning raga", "site": "YouTube", "duration": 19}})
+    assert a["link"]["title"] == "Morning raga" and a["sound"] == f
+    assert "link" not in ac.new_alarm({"last_sound": f}) and "link" not in ac.new_alarm({"last_sound": "", "last_link": {"url": "u"}})
+    store = ac.AlarmStore(os.path.join(tmp, "alarms.json")); store.upsert(a)
+    assert ac.AlarmStore(store.path).alarms[0]["link"]["site"] == "YouTube"
+    assert store.sound_users(f) == 1
+
+
 if __name__ == "__main__":
-    test_next_fire(); test_alarm_output_roundtrip(); test_normalize(); test_play_mode(); test_scheduler(); print("OK")
+    test_next_fire(); test_alarm_output_roundtrip(); test_normalize(); test_play_mode(); test_scheduler(); test_links(); print("OK")
