@@ -93,6 +93,8 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 
 ### Alternative: a standalone app (no Python needed on the target machine)
 
+The build puts **Alarm Clock.app** in the same folder as `alarm_clock.py`, so it uses the very same `alarms.json`, `recordings/` and `links/` as the double-click launcher: open the app either way and you see the same alarms. If you copy the `.app` somewhere else on its own, it starts a fresh set of data next to its new home.
+
 ```bash
 ./build_standalone.sh          # → dist/Alarm Clock.app  (macOS)  or  dist/Alarm Clock/Alarm Clock.exe  (Windows)
 ```
@@ -460,7 +462,7 @@ Individual alarms are listed in Today and Tomorrow for information; they are man
 
 ## 16. Where your data lives
 
-Everything is stored **next to the app**, never in your home folder:
+Everything is stored **next to the app**, never in your home folder. "Next to the app" means the folder that holds `alarm_clock.py` when started by the launcher, or the folder that holds `Alarm Clock.app` when started as the standalone app. Keep the `.app` in the same folder as `alarm_clock.py` (the build puts it there) and both ways of starting share one set of files:
 
 | File | Contents |
 |---|---|

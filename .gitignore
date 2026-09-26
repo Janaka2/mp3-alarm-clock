@@ -18,3 +18,5 @@ recordings/*
 Thumbs.db
 links/
 phone-remote-cert.pem
+Alarm Clock.app/
+alarms.json.backup-*

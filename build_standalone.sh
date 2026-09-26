@@ -1,6 +1,7 @@
 #!/bin/bash
 # Builds a self-contained "Alarm Clock.app" (macOS) or Alarm Clock/ folder with an .exe (Windows via Git Bash)
-# that runs on machines WITHOUT Python installed.  Output lands in dist/.
+# that runs on machines WITHOUT Python installed.  The finished app is moved NEXT TO alarm_clock.py so it shares
+# alarms.json, recordings/ and links/ with the double-click launcher (an app keeps its data beside itself).
 set -e
 cd "$(dirname "$0")"
 [ -x .venv/bin/python ] || python3 -m venv .venv
@@ -16,7 +17,9 @@ if [ "$(uname)" = "Darwin" ]; then
   /usr/libexec/PlistBuddy -c "Add :NSMicrophoneUsageDescription string 'Needed to record voice alarms.'" "$PLIST" 2>/dev/null || true
   /usr/libexec/PlistBuddy -c "Add :NSAppleEventsUsageDescription string 'Needed to schedule the system wake and set the volume.'" "$PLIST" 2>/dev/null || true
   codesign --force --deep --sign - "dist/Alarm Clock.app"
-  echo "Built: dist/Alarm Clock.app  (copy the .app anywhere; alarms.json and recordings/ are kept next to it)"
+  rm -rf "Alarm Clock.app" && mv "dist/Alarm Clock.app" "Alarm Clock.app"
+  echo "Built: Alarm Clock.app (next to alarm_clock.py, sharing its alarms.json and recordings/)."
+  echo "To give it to someone else, copy the .app on its own: it then keeps its data next to wherever it lives."
 else
-  echo "Built: dist/Alarm Clock/  (copy the whole folder; run 'Alarm Clock.exe')"
+  echo "Built: dist/Alarm Clock/  (copy the whole folder; run 'Alarm Clock.exe'; data is kept next to the .exe)"
 fi

@@ -36,7 +36,7 @@ Mp3Player/
 - `RemoteServer` binds `REMOTE_BIND` (0.0.0.0) on `settings.remote_port` (8765). Tests set `REMOTE_BIND = "127.0.0.1"` and port 0. HTTPS needs `openssl` on PATH (macOS / Linux yes, Windows usually no → plain http, page recording disabled but file upload works). Uploads are converted with the same bundled ffmpeg as links. The frozen app inherits all of this; PyInstaller needs nothing extra (stdlib http.server + ssl).
 
 ## Standalone build
-`./build_standalone.sh` → PyInstaller `--windowed --collect-all yt_dlp --collect-all imageio_ffmpeg` (yt-dlp's extractors are lazy imports, imageio-ffmpeg's binary is package data), adds `NSMicrophoneUsageDescription` and ad-hoc codesigns on macOS. A frozen app cannot self-update yt-dlp; rebuild to pick up a newer one. Downloaded unsigned apps get Gatekeeper's "unidentified developer" warning: right-click → Open the first time. Say so in the README; don't try to bypass Gatekeeper.
+`./build_standalone.sh` → PyInstaller (the finished .app is moved next to alarm_clock.py so it shares the launcher's data; `Alarm Clock.app/` is git-ignored) `--windowed --collect-all yt_dlp --collect-all imageio_ffmpeg` (yt-dlp's extractors are lazy imports, imageio-ffmpeg's binary is package data), adds `NSMicrophoneUsageDescription` and ad-hoc codesigns on macOS. A frozen app cannot self-update yt-dlp; rebuild to pick up a newer one. Downloaded unsigned apps get Gatekeeper's "unidentified developer" warning: right-click → Open the first time. Say so in the README; don't try to bypass Gatekeeper.
 
 ## Checklist before saying "it's portable"
 - Fresh clone, no `.venv`: double-click works and the GUI appears.
