@@ -115,6 +115,8 @@ def test_links():
     assert ac.sound_title({"sound": f}) == "youtube_x.mp3"
     assert ac.sound_title({"sound": os.path.join(tmp, "gone.mp3"), "link": {"title": "t"}}) == "Missing file"
     assert ac.sound_title({"sound": ""}) == "No sound"
+    assert ac.recording_title("voice_2026-09-26_21-47-33_phone.wav") == "🎤 Recorded 26 Sep 21:47 from phone"
+    assert ac.recording_title("voice_2026-09-23_22-34-17.wav") == "🎤 Recorded 23 Sep 22:34" and ac.recording_title("odd.wav") == "🎤 Recording"
     # a new alarm remembers where the last sound came from
     a = ac.new_alarm({"last_sound": f, "last_link": {"url": "https://youtu.be/x", "title": "Morning raga", "site": "YouTube", "duration": 19}})
     assert a["link"]["title"] == "Morning raga" and a["sound"] == f

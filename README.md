@@ -139,7 +139,7 @@ The window can be resized; the alarm list grows and shrinks, the editor keeps it
 | **Time** | 24-hour wall-clock time. |
 | **Activity** | The event's name ("Breakfast"), or the alarm's name. |
 | **Schedule** | Which schedule it belongs to, or *Alarm* for an individual alarm. |
-| **Sound** | *🎤 Recording* for a message you recorded, the file name for an audio file, *No sound* or *Missing file*. |
+| **Sound** | *🎤 Recorded 26 Sep 21:47* for a message you recorded (*from phone* when it came from the phone remote), *🔗 title* for a link, the file name for an audio file, *No sound* or *Missing file*. |
 | **Speaker** | Where it plays. |
 | **Status** | See below. |
 
@@ -442,7 +442,8 @@ The computer can stay in one place as the household player while you carry a pho
 | **■ STOP** (red, shown only while something plays) | Stops the message or alarm exactly like STOP on the computer. While an alarm rings a **Snooze N minutes** button appears under it. |
 | **Today** · **Skip today** / **Undo skip** on an event | Same as *Skip today* in the Today view: the event stays in the list, marked *Skipped*, and runs again tomorrow. |
 | **Tomorrow** · **Skip tomorrow** / **Undo skip** | Edit tomorrow before it starts: skipped events are marked *Skipped* for that day only. |
-| **🎤 Record message** on an event | Records with the phone's microphone (or picks a voice memo), sends it to the computer, which converts it, boosts quiet takes like its own recordings and attaches it to that event from its next play on. A silent take is refused with a sentence. |
+| **▶ Play now** on an event | Plays that event's message on the computer right away, at the routine's volume and speaker: the quickest way to check tomorrow's message. STOP on the phone stops it. |
+| **🎤 Record** on an event | Records with the phone's microphone (or picks a voice memo), sends it to the computer, which converts it, boosts quiet takes like its own recordings and attaches it to that event from its next play on. A silent take is refused with a sentence. |
 | **Routines** · the switch next to a routine | Turns the whole routine off (same as *Turn on / off* in Schedules) or back on. |
 | **Routines** · **Skip today** / **Skip tomorrow** | Skips every event of that routine for one day. |
 

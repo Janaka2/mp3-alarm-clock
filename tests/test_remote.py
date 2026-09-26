@@ -70,11 +70,13 @@ def test_server(https: bool):
         r, _ = req(srv, "POST", "/login", b"pin=123456", form); assert r.status == 303
         cookie = r.getheader("Set-Cookie"); assert cookie.startswith("remote=") and "HttpOnly" in cookie and ("Secure" in cookie) == https
         token = cookie.split(";")[0].split("=", 1)[1]
-        r, data = req(srv, "GET", "/", cookie=token); assert r.status == 200 and b"<title>Alarm Clock</title>" in data and b"Record message" in data
+        r, data = req(srv, "GET", "/", cookie=token); assert r.status == 200 and b"<title>Alarm Clock</title>" in data and b"Play now" in data
         r, data = req(srv, "POST", "/api/state", b"{}", {"Content-Type": "application/json"}, cookie=token)
         assert r.status == 200 and json.loads(data)["host"] == "mac"
         r, data = req(srv, "POST", "/api/skip", json.dumps({"sid": "s1", "eid": "e1", "day": "tomorrow", "on": True}).encode(), cookie=token)
         assert json.loads(data)["ok"] and calls[-1] == ("skip", {"sid": "s1", "eid": "e1", "day": "tomorrow", "on": True})
+        r, data = req(srv, "POST", "/api/preview", json.dumps({"sid": "s1", "eid": "e1"}).encode(), cookie=token)
+        assert json.loads(data)["ok"] and calls[-1][0] == "preview"
         r, data = req(srv, "POST", "/api/whatever", b"{}", cookie=token); assert r.status == 404
         r, data = req(srv, "POST", "/api/stop", b"[1,2]", cookie=token); assert r.status == 400
         r, _ = req(srv, "POST", "/api/stop", b"{}", cookie="nope"); assert r.status == 401      # a made-up token is no session

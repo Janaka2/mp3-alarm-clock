@@ -29,6 +29,7 @@ import json
 import os
 import platform
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -1006,8 +1007,20 @@ def sound_title(item: dict) -> str:
         title = item["link"].get("title") or link_site(item["link"].get("url", ""))
         return "🔗 " + (title if len(title) <= 60 else title[:59] + "…")
     if path.startswith(REC_DIR):
-        return "🎤 Recording"
+        return recording_title(path)
     return os.path.basename(path)
+
+
+def recording_title(path: str) -> str:
+    """'🎤 Recorded 26 Sep 21:47' (+ 'from phone') from a recordings/voice_YYYY-MM-DD_HH-MM-SS[_phone].wav name."""
+    m = re.match(r"voice_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})-\d{2}(_phone\d*)?", os.path.basename(path))
+    if not m:
+        return "🎤 Recording"
+    try:
+        when = datetime(int(m[1]), int(m[2]), int(m[3]), int(m[4]), int(m[5]))
+    except ValueError:
+        return "🎤 Recording"
+    return f"🎤 Recorded {when:%d %b %H:%M}" + (" from phone" if m[6] else "")
 
 
 class _QuietLogger:
@@ -1350,14 +1363,15 @@ function render(){if(!S)return;$('host').textContent=S.host;$('now').textContent
  L.innerHTML=h||'<div class="empty">No routines yet – create one on the computer.</div>';$('foot').textContent='';return}
  S[tab].forEach((r,i)=>{const ev=r.kind==='event';
  h+=`<div class="card"><div class="row"><div class="t">${esc(r.time)}</div><div class="l"><b>${esc(r.label)}</b><small>${esc(r.sched)} · ${esc(r.sound)}</small></div><div class="st ${tone(r.status)}">${esc(r.status)}</div></div>`;
- if(ev)h+=`<div class="acts">${r.can_skip?`<button onclick="skipRow(${i})">${r.skipped?'Undo skip':'Skip '+tab}</button>`:''}<button class="rec" onclick="sheetOpenRow(${i})">🎤 Record message</button></div>`;
+ if(ev)h+=`<div class="acts">${r.has_sound?`<button class="pri" onclick="playRow(${i})">▶ Play now</button>`:''}${r.can_skip?`<button onclick="skipRow(${i})">${r.skipped?'Undo skip':'Skip '+tab}</button>`:''}<button class="rec" onclick="sheetOpenRow(${i})">🎤 Record</button></div>`;
  h+='</div>'});
  L.innerHTML=h||`<div class="empty">Nothing planned ${tab}.</div>`;$('foot').textContent=tab==='today'?'Skips apply to today only. Alarms set on the computer are listed but managed there.':'Skips here apply to tomorrow only.'}
 function skipRow(i){const r=S[tab][i];if(r)api('skip',{sid:r.sid,eid:r.eid,day:tab,on:!r.skipped})}
+function playRow(i){const r=S[tab][i];if(r)api('preview',{sid:r.sid,eid:r.eid})}
 function sheetOpenRow(i){const r=S[tab][i];if(r)sheetOpen(r.sid,r.eid,r.label)}
 function toggleSched(i){const s=S.schedules[i];if(s)api('toggle',{sid:s.id,enabled:!s.enabled})}
 function skipSched(i,day){const s=S.schedules[i];if(s)api('skip',{sid:s.id,day:day,on:!(day==='today'?s.skipped_today:s.skipped_tomorrow)})}
-function sheetOpen(sid,eid,label){target={sid,eid,label};blob=null;$('sh-title').textContent='Message for “'+label+'”';$('sh-sub').textContent='Replaces the current sound of this event, from its next play onwards.';
+function sheetOpen(sid,eid,label){target={sid,eid,label};blob=null;$('sh-title').textContent='Message for “'+label+'”';const cur=(S[tab].find(x=>x.eid===eid)||{}).sound||'';$('sh-sub').textContent=(cur&&cur!=='No sound'?'Replaces '+cur+' from the next play onwards.':'This event has no sound yet.')+' After saving, press ▶ Play now to hear it on the computer.';
  $('sh-audio').style.display='none';$('sh-use').disabled=true;$('sh-rec').textContent='●  Record';$('sh-hint').innerHTML='';
  if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder)){$('sh-rec').textContent='Choose or record a file…';$('sh-rec').onclick=()=>$('sh-file').click();
  $('sh-hint').textContent=window.isSecureContext?'This browser cannot record directly; pick a voice memo instead.':'This page is plain http, so the phone will not allow the microphone. Pick a voice-memo file instead.'}
@@ -1391,7 +1405,10 @@ REMOTE_LOGIN = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><m
 class _QuietHTTPServer(ThreadingHTTPServer):
     """A phone that types http:// on the https port, or drops the Wi-Fi mid-request, is one log line, not a traceback."""
     def handle_error(self, request, client_address):
-        log(f"phone remote: request from {client_address[0]} failed: {sys.exc_info()[1]}")
+        err = sys.exc_info()[1]
+        if isinstance(err, (ConnectionResetError, BrokenPipeError, ssl.SSLError, TimeoutError)):
+            return                                  # a phone closing the connection early, or probing the port
+        log(f"phone remote: request from {client_address[0]} failed: {err}")
 
 
 class RemoteServer:
@@ -1565,7 +1582,7 @@ class _RemoteHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             self._json(400, {"error": "Bad request."})
             return
-        if action not in ("state", "stop", "snooze", "skip", "toggle"):
+        if action not in ("state", "stop", "snooze", "skip", "toggle", "preview"):
             self._json(404, {"error": "Unknown action."})
             return
         self._json(200, self.server_obj.dispatch(action, payload))
@@ -3471,7 +3488,8 @@ class App(tk.Tk):
         if action == "state":
             return self._remote_state()
         if action == "stop":
-            what = "message" if self.current_ann else "alarm" if self.ring_windows else ""
+            what = ("message" if self.current_ann else "alarm" if self.ring_windows
+                    else "preview" if self.player.is_playing() or (self.airplay and self.airplay.playing) else "")
             self._stop_all()
             log("phone remote: stop")
             return {"ok": True, "note": f"Stopped the {what}." if what else "Nothing was playing."}
@@ -3508,6 +3526,20 @@ class App(tk.Tk):
                 note = f"“{sc['name']}” is skipped {when}." if on else f"“{sc['name']}” is back on {when}."
             self._after_schedule_change()
             return {"ok": True, "note": note}
+        if action == "preview":
+            eid = str(p.get("eid") or "")
+            ev = next((e for e in sc["events"] if e["id"] == eid), None)
+            if not ev:
+                return {"error": "That event no longer exists."}
+            path = resolve_sound(ev.get("sound", ""))
+            if not path or not os.path.isfile(path):
+                return {"error": f"“{ev['label']}” has no sound yet. Record a message for it first."}
+            if self.ring_windows or self.current_ann or self.recorder.recording:
+                return {"error": "Something is playing or recording on the computer right now. Stop it first."}
+            self._preview_sound(path, int(sc["volume"]), sc.get("output", ""), self.l_today_hint, "message")
+            log(f"phone remote: play now '{ev['label']}' ({sc['name']})")
+            self._tick_indicators()
+            return {"ok": True, "note": f"Playing “{ev['label']}” on the computer now."}
         if action == "toggle":
             on = bool(p.get("enabled"))
             self._set_schedule_enabled(sc, on, source="phone remote")
@@ -3544,6 +3576,8 @@ class App(tk.Tk):
         elif self.ring_windows:
             labels = [a["label"] for a in self.store.alarms if a["id"] in self.ring_windows] or ["alarm"]
             playing = ("Playing " if len(self.ring_windows) == len(self.once_play) else "Ringing: ") + ", ".join(f"“{x}”" for x in labels)
+        elif self.player.is_playing() or (self.airplay and self.airplay.playing):
+            playing = "Playing a preview on the computer"
         else:
             playing = ""
         ev = self.scheduler.next_event()
@@ -3553,6 +3587,7 @@ class App(tk.Tk):
         def row(r: dict, day: date) -> dict:
             return {"kind": r["kind"], "time": r["time"], "label": r["label"], "sched": r["sched"], "sound": r["sound"],
                     "status": r["status"], "sid": r["sid"], "eid": r["eid"], "skipped": bool(r.get("skipped")),
+                    "has_sound": bool(r["kind"] == "event" and r.get("path") and os.path.isfile(r["path"])),
                     "can_skip": bool(r["kind"] == "event" and (self._can_skip(r) if day == today else r["status"] in ("Planned", "Skipped", "No sound")))}
         return {"host": platform.node().split(".")[0], "now": f"{now:%H:%M}", "playing": playing, "next": nxt,
                 "today": [row(r, today) for r in self._today_rows()],
@@ -3579,7 +3614,7 @@ class App(tk.Tk):
                 status = ("Off" if not ev["enabled"] else "Skipped" if skipped else "No sound" if not path
                           else "Missing file" if not os.path.isfile(path) else "Planned")
                 rows.append(dict(kind="event", dt=dt, time=ev["time"], label=ev["label"], sched=sc["name"], sid=sc["id"], eid=ev["id"],
-                                 sound=sound_title(ev), status=status, skipped=skipped))
+                                 sound=sound_title(ev), status=status, skipped=skipped, path=path))
         start = datetime.combine(day, dtime(0, 0))
         for a in self.store.alarms:
             nf = next_fire(a, start)
