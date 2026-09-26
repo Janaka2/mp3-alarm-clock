@@ -49,7 +49,8 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 | 🛑 **Big red STOP** | One click, or Enter / Esc. Snooze with one click. Ring timeout so a forgotten alarm doesn't play forever |
 | 👀 **Honest status** | Always-visible pills: *alarm set + countdown* · *computer will stay awake* · *will wake from sleep at …* (or exactly why not, with a *Try again* button) |
 | 🧠 **Sensible defaults** | New alarm = next round hour, last sound, last volume. "Save alarm" with zero edits is a valid alarm |
-| 📦 **Portable** | Everything (`alarms.json`, `recordings/`, `alarmclock.log`) lives next to the app. Copy the folder anywhere |
+| 📱 **Phone remote** | Tick one box and every phone on the Wi-Fi gets a page with **STOP**, today and tomorrow with *Skip*, a switch to **turn a routine off**, and **record a message** straight from the phone. PIN-protected, https, nothing leaves the house |
+| 📦 **Portable** | Everything (`alarms.json`, `recordings/`, `links/`, `alarmclock.log`) lives next to the app. Copy the folder anywhere |
 
 ---
 
@@ -69,9 +70,10 @@ Phone alarms are fine until you want *that* song, at full volume, through real s
 12. [What the status pills mean](#12-what-the-status-pills-mean)
 13. [Sleep, wake-up and missed alarms](#13-sleep-wake-up-and-missed-alarms)
 14. [AirPlay speakers (macOS)](#14-airplay-speakers-macos)
-15. [Where your data lives](#15-where-your-data-lives)
-16. [Troubleshooting](#16-troubleshooting)
-17. [Questions people ask](#17-questions-people-ask)
+15. [Phone remote](#15-phone-remote)
+16. [Where your data lives](#16-where-your-data-lives)
+17. [Troubleshooting](#17-troubleshooting)
+18. [Questions people ask](#18-questions-people-ask)
 
 ## 1. Install and start
 
@@ -360,6 +362,7 @@ Press **▸ More options (sleep, snooze, fade-in)** under the alarm list to open
 | **Turn the system volume up to N % when an alarm rings** | on (macOS), off elsewhere | Sets the computer's master volume to N (Windows: raises it) and un-mutes it just before ringing, so an alarm cannot be silenced by a volume knob you forgot about. Not used for AirPlay speakers (they have their own volume). |
 | **Snooze for N minutes** | 5 | Length of one snooze. 1–60. |
 | **Fade the sound in over N seconds** | 20 | Ramp from silent to the alarm volume. 0 turns fading off (instant full volume). 0–120. Preview never fades. |
+| **Phone remote** | off | Serves the phone page on the home Wi-Fi and shows its address and PIN; **New PIN** disconnects every phone. See [section 15](#15-phone-remote). |
 
 ## 12. What the status pills mean
 
@@ -419,7 +422,42 @@ At ring time the app launches Music (it pre-launches it 3 minutes early), routes
 - **Preview** also plays through the AirPlay speaker, so you can test the whole chain.
 - Windows / Linux: AirPlay entries are simply not offered.
 
-## 15. Where your data lives
+## 15. Phone remote
+
+The computer can stay in one place as the household player while you carry a phone. Turn the remote on once and every phone on the same Wi-Fi gets a small page with the things you need day to day.
+
+<p align="center"><img src="docs/screenshots/phone-today.png" width="300" alt="The phone page: Today tab with STOP, skip and record buttons">&nbsp;&nbsp;<img src="docs/screenshots/phone-record.png" width="300" alt="Recording a message on the phone"></p>
+
+### Turn it on
+
+1. Open **▸ More options** under the alarm list and tick **Phone remote**.
+2. The line below shows the address to open, for example `https://192.168.1.23:8765`, and a six-digit **PIN**.
+3. On the phone, type the address into the browser. The first time it warns that the certificate is not trusted: that is expected, it is your own computer's certificate, so choose *Continue* / *Visit this website* (on iPhone: *Show details → visit this website*). Enter the PIN once. The phone stays connected until you press **New PIN** on the computer.
+4. Add the page to the home screen (*Share → Add to Home Screen*) and it opens like an app.
+
+### What the phone can do
+
+| On the phone | What happens on the computer |
+|---|---|
+| **■ STOP** (red, shown only while something plays) | Stops the message or alarm exactly like STOP on the computer. While an alarm rings a **Snooze N minutes** button appears under it. |
+| **Today** · **Skip today** / **Undo skip** on an event | Same as *Skip today* in the Today view: the event stays in the list, marked *Skipped*, and runs again tomorrow. |
+| **Tomorrow** · **Skip tomorrow** / **Undo skip** | Edit tomorrow before it starts: skipped events are marked *Skipped* for that day only. |
+| **🎤 Record message** on an event | Records with the phone's microphone (or picks a voice memo), sends it to the computer, which converts it, boosts quiet takes like its own recordings and attaches it to that event from its next play on. A silent take is refused with a sentence. |
+| **Routines** · the switch next to a routine | Turns the whole routine off (same as *Turn on / off* in Schedules) or back on. |
+| **Routines** · **Skip today** / **Skip tomorrow** | Skips every event of that routine for one day. |
+
+Individual alarms are listed in Today and Tomorrow for information; they are managed on the computer. Everything the phone does is written to `alarmclock.log` with *phone remote:* in front.
+
+### Good to know
+
+- **Only your Wi-Fi.** The page is reachable from the home network only, never from the internet, and every phone must know the PIN. Five wrong PINs lock the login for ten minutes. **New PIN** disconnects all phones at once.
+- **Recording needs https.** Phone browsers allow the microphone only on a secure address. The computer makes its own certificate the first time (it needs the `openssl` command, present on macOS and Linux; on Windows install it or accept that phones can only *pick* a voice-memo file instead of recording live). Without a certificate the page is plain `http://` and the app says so: on plain http the PIN and the phone's session travel unencrypted, so use it only on a Wi-Fi you trust, and phones have to enter the PIN again after closing the browser.
+- **The computer must be awake** for the page to answer; *Keep my computer awake* in More options helps. If the page says *No connection to the alarm clock*, the app is closed, the computer is asleep or the phone left the Wi-Fi.
+- **The address may change** if your router hands the computer a new IP. The current one is always shown in More options and in the status line at the bottom of the window. Give the computer a fixed IP in the router if this bothers you.
+- **Port** 8765 by default (`remote_port` in `alarms.json` if another program uses it).
+- Changes from the phone show up on the computer within a second; an open schedule editor that is not being edited is refreshed too.
+
+## 16. Where your data lives
 
 Everything is stored **next to the app**, never in your home folder:
 
@@ -429,14 +467,15 @@ Everything is stored **next to the app**, never in your home folder:
 | `alarms.json.backup-v1` | Created once when a file from the previous version is upgraded — your alarms before schedules existed. |
 | `recordings/` | Voice recordings (`voice_2026-09-24_06-15-02.wav`). Also the default folder in *Choose a file…*. |
 | `links/` | Sounds saved from YouTube / SoundCloud links (`youtube_jNQXAC9IVRw.mp3`), one per video or track, reused across alarms. Delete a file here to free space; the alarm will ask for the link again. |
-| `alarmclock.log` | What happened and when: alarms due, snoozes, missed alarms, wake requests, errors. Look here first when something is unclear. |
+| `alarmclock.log` | What happened and when: alarms due, snoozes, missed alarms, wake requests, phone remote actions, errors. Look here first when something is unclear. |
+| `phone-remote-cert.pem` | The self-signed certificate the phone page uses for https, made on this computer the first time the remote is turned on. Delete it to get a fresh one. |
 | `.venv/` | The private Python environment the launcher created (with its own copy of ffmpeg for link conversion). Safe to delete; it is rebuilt on the next start. |
 
 If the file cannot be read (for example after a bad manual edit), the app starts empty, keeps the original as `alarms.json.broken-<date>` and tells you so; it never overwrites it.
 
 **Moving to another computer:** copy the whole folder. Alarms whose sound files live *inside* the folder (recordings, link sounds) keep working; alarms pointing to files elsewhere on the old machine will say *file not found* until you choose the file again.
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 | Problem | What to do |
 |---|---|
@@ -460,9 +499,13 @@ If the file cannot be read (for example after a bad manual edit), the app starts
 | **The password dialog keeps coming back** | It appears once per change of the next alarm or message time. Editing several alarms in a row, or a schedule with many messages, triggers it each time; finish editing first, or turn *Wake my computer from sleep* off (the keep-awake guard still works without it). |
 | **A message shows *Missed* although the computer was on** | Its schedule was saved or turned on after the time had passed today (the note says so), or another sound kept it waiting for more than two minutes. Tomorrow it plays normally. |
 | **Two messages were due at the same time and only one played at once** | That is by design: one plays after the other. If the second one would start more than two minutes late it is marked *Missed*. |
-| **Something else** | Open `alarmclock.log` next to the app; every alarm, snooze, wake request and error is written there with a timestamp. |
+| **The phone says "No connection to the alarm clock"** | The app is closed, the computer is asleep, or the phone is on another network (mobile data, guest Wi-Fi). Check the address in More options: it changes when the router gives the computer a new IP. |
+| **The phone browser refuses the certificate / shows "not private"** | Expected for a home-made certificate. Choose *Show details → visit this website* (iPhone) or *Advanced → Proceed* (Android). It is your own computer. |
+| **"Record message" only offers a file picker** | The page was opened on `http://` (no certificate could be made, or you typed http). Use the `https://` address shown in More options. On Windows install `openssl` so the certificate can be created. |
+| **"The phone remote could not start"** | Another program uses port 8765. Change `remote_port` in `alarms.json` (app closed) or quit the other program, then switch the remote off and on. |
+| **Something else** | Open `alarmclock.log` next to the app; every alarm, snooze, wake request, phone action and error is written there with a timestamp. |
 
-## 17. Questions people ask
+## 18. Questions people ask
 
 **Can I close the window and still get the alarm?** No. The app must stay open (minimised or behind other windows is fine). It warns you if you try to quit with an alarm set.
 
@@ -482,6 +525,8 @@ If the file cannot be read (for example after a bad manual edit), the app starts
 
 **Can two rooms get different messages at the same moment?** Not in this version: messages on one computer play one after the other.
 
+**Can I control it from my phone?** Yes: More options → *Phone remote* gives every phone on the Wi-Fi a page with STOP, skip for today or tomorrow, turn a routine off and record a message ([section 15](#15-phone-remote)). It works only inside the house; there is no cloud and no account.
+
 ---
 
 ## Project layout
@@ -493,6 +538,7 @@ Start Alarm Clock.command   macOS launcher      Start Alarm Clock.bat   Windows 
 start_alarm_clock.sh        Linux launcher      build_standalone.sh     PyInstaller build
 tests/test_logic.py         headless tests for alarm scheduling (next_fire, grace, snooze, missed) and link helpers
 tests/test_schedules.py     headless tests for schedules (days, skip/undo, lateness, DST gap, migration, duplicate, queue)
+tests/test_remote.py        headless tests for the phone remote web server (PIN, sessions, uploads; loopback only)
 tools/make_screenshots.py   regenerates docs/screenshots/*.png from a throw-away sample alarms.json
 .claude/                    Claude Code skills + proactive review agents used to build this
 ```
@@ -506,6 +552,7 @@ tools/make_screenshots.py   regenerates docs/screenshots/*.png from a throw-away
 ```bash
 .venv/bin/python tests/test_logic.py      # alarm scheduling logic
 .venv/bin/python tests/test_schedules.py  # family schedules
+.venv/bin/python tests/test_remote.py     # phone remote server
 bash "Start Alarm Clock.command"           # GUI smoke test
 .venv/bin/python tools/make_screenshots.py # refresh the manual's screenshots (macOS, needs Screen Recording permission)
 ```

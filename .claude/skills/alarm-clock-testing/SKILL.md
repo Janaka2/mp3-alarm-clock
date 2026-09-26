@@ -10,7 +10,7 @@ description: How to verify the alarm clock end-to-end – headless logic test fo
 python3 -m py_compile alarm_clock.py
 .venv/bin/python tests/test_logic.py
 ```
-`tests/test_schedules.py` covers schedules (days, skip/undo, lateness, DST gap, migration, duplicate, queue). `tests/test_logic.py` covers `next_fire` for once/daily/weekdays, the GRACE catch-up, `Scheduler.tick` firing/missed/snooze. Add a case there whenever you touch scheduling.
+`tests/test_remote.py` covers the phone remote server on loopback (PIN, lock-out, sessions, api routing, WAV upload → recordings/, https). `tests/test_schedules.py` covers schedules (days, skip/undo, lateness, DST gap, migration, duplicate, queue). `tests/test_logic.py` covers `next_fire` for once/daily/weekdays, the GRACE catch-up, `Scheduler.tick` firing/missed/snooze. Add a case there whenever you touch scheduling.
 
 ## 2. GUI smoke test (before any "done")
 1. `bash "Start Alarm Clock.command"` (macOS) – window must appear with no traceback in the terminal.
@@ -18,7 +18,8 @@ python3 -m py_compile alarm_clock.py
 3. Click "+1 min" → "Add alarm" → list shows it, status bar shows "in 59s", indicators show Armed + Keeping awake; if "Schedule a system wake" is on, no password prompt should appear for an alarm < 60 s away.
 4. Wait: ring window pops on top, main window shows the red STOP bar, volume fades in. Snooze → re-rings after N min. STOP → everything quiet, indicators back to "No alarm armed".
 5. Close with an alarm armed → warning dialog.
-6. Sound step → 🔗 Use a link… → paste `https://www.youtube.com/watch?v=jNQXAC9IVRw` (19 s) → Get the sound: the status line walks through *Looking up → Downloading → Converting*, the title "Me at the zoo" replaces the file name with "YouTube · 0:19" under it, ▶ Preview plays it, `links/youtube_jNQXAC9IVRw.mp3` exists. Paste a playlist link → one red sentence, row stays open. (Needs the internet; skip and say so when offline.)
+6. More options → Phone remote on → open the shown https address on a phone on the same Wi-Fi (accept the certificate once, enter the PIN): STOP appears while a message plays and stops it; Skip today / Undo skip changes the Today view on the computer; Routines switch turns a schedule off (○ in the list); 🎤 Record message → the event's sound becomes 🎤 Recording and the file is in recordings/ as voice_…_phone.wav. Without a phone, the loopback GUI probe (session notes) exercises the same calls.
+7. Sound step → 🔗 Use a link… → paste `https://www.youtube.com/watch?v=jNQXAC9IVRw` (19 s) → Get the sound: the status line walks through *Looking up → Downloading → Converting*, the title "Me at the zoo" replaces the file name with "YouTube · 0:19" under it, ▶ Preview plays it, `links/youtube_jNQXAC9IVRw.mp3` exists. Paste a playlist link → one red sentence, row stays open. (Needs the internet; skip and say so when offline.)
 
 ## 3. Sleep / wake (manual, per OS – see [[power-management]])
 - Set an alarm 4 min out, confirm "OS wake registered", sleep the machine (Apple menu → Sleep / Start → Sleep). It must wake ≈ 1 min early and ring.

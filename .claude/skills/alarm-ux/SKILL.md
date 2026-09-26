@@ -42,6 +42,13 @@ The product is judged on details people feel every morning, not on the framework
 - Does a brand-new alarm still work with zero edits?
 - Did an error path fall back to a stack trace instead of a sentence? (see [[plain-language-errors]])
 
+## Phone remote (since 2026-09-26)
+- More options → "Phone remote" checkbox; the muted line under it is the only place the address + PIN live (plus the footer status line). Wording: "On your phone open  https://… and enter PIN  483 921." A stopped server says why and what to do (port in use → switch off and on).
+- The page (`REMOTE_PAGE`, one HTML string) mirrors the desktop vocabulary: STOP (red, only while something plays) + "Snooze N minutes" while an alarm rings, Today / Tomorrow tabs with "Skip today|tomorrow / Undo skip" and "🎤 Record message", Routines tab with an on/off switch (= Turn on / off) and Skip today / Skip tomorrow. Statuses are the Today view's words (Upcoming / Skipped / Played / Missed …; future days say Planned). Individual alarms are listed read-only ("managed on the computer").
+- Every phone action returns a `note` sentence the page shows as a toast ("“Brush teeth” is skipped today.", "“Son” is off.", "“Lights out” now plays your new message.") and is logged with a `phone remote:` prefix. Errors are one sentence in the same toast, red.
+- Recording sheet: Record → "■ Stop recording  N s" with a level bar → `<audio>` preview → "Use this message". No MediaRecorder / no https → the button becomes "Choose or record a file…" and the hint says to open the https address. A silent take is refused by the computer ("Almost nothing was recorded…"), same threshold as the desktop recorder (`QUIET_PEAK`).
+- Desktop side after a phone change: `_after_schedule_change` refreshes Today / Schedules / pills; an open, unedited schedule draft is updated in place (attach) so a later "Save schedule" cannot revert the phone's message.
+
 ## Sound from a link (since 2026-09-25)
 - Third source next to "Choose a file…" and "Record my voice": **🔗 Use a link…**. In the alarm editor the link row (Link · entry · Get the sound · Cancel) *replaces* the button row while open, and progress / errors go to `l_rec` – the editor column must not grow (it already fills 1400x840 exactly; `brow` stays ≈ 540 px). To make room, "▶ Preview" turns into "■ Stop" while a preview plays (`_sync_preview_button`, refreshed by `_tick_status`) instead of a separate Stop button.
 - In the event editor it is state D of `_event_sound_ui` (`ev_link_open`), with the hint line reporting progress; Done refuses while a fetch runs, Cancel / another schedule / closing the app abort it.

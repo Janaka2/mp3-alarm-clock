@@ -18,7 +18,11 @@ Runs on macOS, Windows and Linux.  Requires: pygame-ce, sounddevice, yt-dlp, ima
 from __future__ import annotations
 
 import atexit
+import html
+import secrets
 import shutil
+import socket
+import ssl
 import webbrowser
 import ctypes
 import json
@@ -34,7 +38,8 @@ import wave
 from array import array
 from datetime import date, datetime, timedelta
 from datetime import time as dtime
-from urllib.parse import urlparse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
@@ -74,6 +79,7 @@ BASE_DIR = _base_dir()
 DATA_FILE = os.path.join(BASE_DIR, "alarms.json")
 REC_DIR = os.path.join(BASE_DIR, "recordings")
 LINK_DIR = os.path.join(BASE_DIR, "links")        # sound saved from YouTube / SoundCloud links, one file per video or track
+CERT_FILE = os.path.join(BASE_DIR, "phone-remote-cert.pem")   # self-signed certificate for the phone remote (HTTPS)
 LOG_FILE = os.path.join(BASE_DIR, "alarmclock.log")
 
 
@@ -102,6 +108,9 @@ DEFAULT_SETTINGS = {
     "last_output": "",           # "" = system default output device
     "last_mode": "alarm",        # alarm = ring (loop) until stopped | play = play the whole file once
     "last_link": None,           # {url, title, site, duration} when last_sound came from a web link
+    "remote_enabled": False,     # phone remote: a small web page served on the home Wi-Fi
+    "remote_pin": "",            # 6 digits the phone must enter once (generated on first use)
+    "remote_port": 8765,
 }
 
 
@@ -1198,6 +1207,422 @@ class LinkFetcher:
         return out
 
 
+# --------------------------------------------------------------------------- phone remote (web page on the home Wi-Fi)
+def lan_ip() -> str:
+    """The computer's address on the local network (no packet is sent: UDP connect only picks the interface)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("192.0.2.1", 9))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except OSError:
+        return "127.0.0.1"
+
+
+def make_pin() -> str:
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+def pin_label(pin: str) -> str:
+    return f"{pin[:3]} {pin[3:]}" if len(pin) == 6 else pin
+
+
+REMOTE_BIND = "0.0.0.0"      # every interface, so phones on the Wi-Fi can reach the page (tests use 127.0.0.1)
+
+
+def ensure_cert(path: str | None = None) -> bool:
+    """Create a self-signed certificate for HTTPS once (phones only allow the microphone on https).  Needs openssl."""
+    path = path or CERT_FILE
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        return True
+    exe = shutil.which("openssl")
+    if not exe:
+        log("phone remote: openssl not found, serving plain http (no microphone on the phone page)")
+        return False
+    key, crt = path + ".key", path + ".crt"
+    cmd = [exe, "req", "-x509", "-newkey", "rsa:2048", "-sha256", "-days", "3650", "-nodes", "-subj", "/CN=Alarm Clock",
+           "-addext", f"subjectAltName=IP:{lan_ip()},DNS:alarm-clock.local", "-keyout", key, "-out", crt]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                           **({"creationflags": 0x08000000} if IS_WIN else {}))
+        if r.returncode != 0:
+            log(f"phone remote: could not create a certificate ({r.stderr.strip()[-200:]}); serving plain http")
+            return False
+        with open(path, "w", encoding="utf-8") as out:
+            for part in (key, crt):
+                with open(part, encoding="utf-8") as f:
+                    out.write(f.read())
+        os.chmod(path, 0o600)
+        log("phone remote: created a self-signed certificate for https")
+        return True
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"phone remote: certificate step failed ({e}); serving plain http")
+        return False
+    finally:
+        for part in (key, crt):
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+
+
+def convert_upload(src: str, dst_wav: str) -> None:
+    """Phone recordings arrive as webm/opus or mp4/aac: turn them into the same mono 16-bit WAV the Recorder writes."""
+    if src.lower().endswith(".wav"):
+        with wave.open(src, "rb") as w:
+            if w.getnchannels() == 1 and w.getsampwidth() == 2:
+                shutil.copyfile(src, dst_wav)
+                return
+    ff = LinkFetcher.ffmpeg_path()
+    if not ff:
+        log("phone recording refused: ffmpeg missing – delete .venv next to the app and start again to reinstall it")
+        raise RuntimeError("Recording from the phone is not set up on the computer (its audio converter is missing). "
+                           "Send a voice-memo file instead, or ask whoever set up the alarm clock to reinstall it.")
+    cmd = [ff, "-y", "-hide_banner", "-loglevel", "error", "-i", src, "-vn", "-ac", "1", "-ar", "44100",
+           "-sample_fmt", "s16", dst_wav]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, **({"creationflags": 0x08000000} if IS_WIN else {}))
+    if r.returncode != 0 or not os.path.isfile(dst_wav):
+        raise RuntimeError("The recording from the phone could not be converted. Try recording again.\n\nDetails: "
+                           + r.stderr.strip()[-200:])
+
+
+def normalize_wav(path: str) -> tuple[float, float]:
+    """Apply the Recorder's level normalisation to a WAV file in place; returns (peak, gain_db)."""
+    with wave.open(path, "rb") as w:
+        rate, frames = w.getframerate(), w.readframes(w.getnframes())
+    samples, peak, gain = normalize_int16(array("h", frames))
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(samples.tobytes())
+    return peak, gain
+
+
+REMOTE_PAGE = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#1F2A44">
+<title>Alarm Clock</title>
+<style>
+:root{--bg:#F3F5F9;--card:#fff;--line:#E3E7EE;--head:#1F2A44;--text:#1E2533;--muted:#6B7280;--accent:#3A6FF0;--good:#1E8E3E;--warn:#C25E00;--bad:#C62828;--soft:#EEF1F5}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,"Helvetica Neue",Segoe UI,Roboto,sans-serif}
+header{background:var(--head);color:#fff;padding:calc(14px + env(safe-area-inset-top)) 16px 14px}header h1{margin:0;font-size:17px;font-weight:600;color:#C7D0E4}
+#now{margin-top:6px;font-size:18px}#stop{display:none;width:100%;margin-top:12px;padding:16px;border:0;border-radius:12px;background:var(--bad);color:#fff;font-size:20px;font-weight:700}
+#snooze{display:none;width:100%;margin-top:8px;padding:12px;border:0;border-radius:12px;background:#2E3F66;color:#fff;font-size:17px}
+nav{display:flex;gap:6px;padding:12px 16px 0}nav button{flex:1;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--card);font-size:15px;color:var(--text)}
+nav button.on{background:var(--head);color:#fff;border-color:var(--head)}
+main{padding:12px 16px calc(24px + env(safe-area-inset-bottom))}.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+.row{display:flex;align-items:center;gap:10px}.t{font-weight:700;min-width:52px}.l{flex:1;min-width:0}.l small{display:block;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.st{font-size:13px;color:var(--muted)}.st.good{color:var(--good)}.st.bad{color:var(--bad)}.st.warn{color:var(--warn)}
+.acts{display:flex;gap:8px;margin-top:10px}.acts button,.sheet button,.login button{padding:10px 12px;border:0;border-radius:10px;background:var(--soft);color:var(--text);font-size:15px}
+.acts button.pri,.sheet button.pri,.login button{background:var(--accent);color:#fff}.acts button.rec{background:#FBE3E3;color:var(--bad)}
+.empty{color:var(--muted);text-align:center;padding:24px 0}.hint{color:var(--muted);font-size:14px;margin:8px 2px}
+.sheet{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-radius:16px 16px 0 0;padding:18px 16px calc(18px + env(safe-area-inset-bottom));box-shadow:0 -8px 30px rgba(0,0,0,.25);display:none}
+.sheet h2{margin:0 0 4px;font-size:18px}.sheet .big{width:100%;padding:18px;font-size:20px;font-weight:700;margin-top:12px}.sheet .rec{background:var(--bad);color:#fff}
+.sheet .row2{display:flex;gap:8px;margin-top:12px}.sheet .row2 button{flex:1}#level{height:8px;background:var(--soft);border-radius:4px;margin-top:12px;overflow:hidden}#level i{display:block;height:100%;width:0;background:var(--good)}
+#toast{position:fixed;left:16px;right:16px;top:12px;background:var(--head);color:#fff;padding:12px 14px;border-radius:10px;display:none;z-index:9}
+.login{max-width:360px;margin:60px auto;padding:0 16px;text-align:center}.login input{width:100%;font-size:28px;letter-spacing:8px;text-align:center;padding:12px;border:1px solid var(--line);border-radius:10px;margin:14px 0}.login button{width:100%;padding:14px;font-size:17px}
+.sw{width:50px;height:30px;border-radius:15px;background:#C7CDD8;position:relative;border:0}.sw.on{background:var(--good)}.sw i{position:absolute;top:3px;left:3px;width:24px;height:24px;border-radius:12px;background:#fff;transition:left .15s}.sw.on i{left:23px}
+</style></head><body>
+<header><h1>Alarm Clock · <span id="host"></span></h1><div id="now">Connecting…</div><button id="stop" onclick="api('stop',{})">■ &nbsp;STOP</button><button id="snooze" onclick="api('snooze',{})">Snooze</button></header>
+<nav><button id="tab-today" class="on" onclick="show('today')">Today</button><button id="tab-tomorrow" onclick="show('tomorrow')">Tomorrow</button><button id="tab-routines" onclick="show('routines')">Routines</button></nav>
+<main><div id="list"></div><div class="hint" id="foot"></div></main>
+<div id="toast"></div>
+<div class="sheet" id="sheet"><h2 id="sh-title">Record a message</h2><div class="st" id="sh-sub"></div>
+<div id="level"><i></i></div>
+<button class="big rec" id="sh-rec" onclick="recToggle()">●&nbsp; Record</button>
+<audio id="sh-audio" controls style="width:100%;margin-top:12px;display:none"></audio>
+<div class="row2"><button onclick="sheetClose()">Cancel</button><button class="pri" id="sh-use" onclick="upload()" disabled>Use this message</button></div>
+<div class="hint" id="sh-hint"></div>
+<input type="file" id="sh-file" accept="audio/*" style="display:none" onchange="fileChosen(this)"></div>
+<script>
+let S=null,tab='today',rec=null,chunks=[],blob=null,target=null,timer=null,t0=0,ctx=null;
+const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function toast(m,bad){const t=$('toast');t.textContent=m;t.style.background=bad?'#C62828':'#1F2A44';t.style.display='block';clearTimeout(t._j);t._j=setTimeout(()=>t.style.display='none',3200)}
+async function api(a,p){try{const r=await fetch('/api/'+a,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p||{})});
+ if(r.status===401){location.reload();return}const j=await r.json();if(j.error)toast(j.error,true);else if(j.note)toast(j.note);await poll();return j}catch(e){toast('The alarm clock did not answer. Is it still running?',true)}}
+async function poll(){try{const r=await fetch('/api/state',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if(r.status===401){location.reload();return}S=await r.json();render()}catch(e){$('now').textContent='No connection to the alarm clock';}}
+function show(t){tab=t;for(const k of['today','tomorrow','routines'])$('tab-'+k).className=k===t?'on':'';render()}
+function tone(st){return /Playing|Ringing/.test(st)?'good':/Missed|Failed|Missing/.test(st)?'bad':/Skipped|Off|No sound/.test(st)?'warn':''}
+function render(){if(!S)return;$('host').textContent=S.host;$('now').textContent=S.playing||S.next||'Nothing is set';$('stop').style.display=S.playing?'block':'none';$('snooze').style.display=S.snooze?'block':'none';$('snooze').textContent='Snooze '+S.snooze_minutes+' minutes';
+ const L=$('list');let h='';
+ if(tab==='routines'){S.schedules.forEach((s,i)=>{h+=`<div class="card"><div class="row"><div class="l"><b>${esc(s.name)}</b><small>${esc(s.days)} · ${+s.events} events · ${esc(s.output)}</small></div>
+ <button class="sw ${s.enabled?'on':''}" aria-label="on or off" onclick="toggleSched(${i})"><i></i></button></div>
+ ${s.enabled?`<div class="acts"><button onclick="skipSched(${i},'today')">${s.skipped_today?'Undo skip today':'Skip today'}</button><button onclick="skipSched(${i},'tomorrow')">${s.skipped_tomorrow?'Undo skip tomorrow':'Skip tomorrow'}</button></div>`:'<div class="hint">Off – nothing from this routine plays until it is turned on again.</div>'}</div>`});
+ L.innerHTML=h||'<div class="empty">No routines yet – create one on the computer.</div>';$('foot').textContent='';return}
+ S[tab].forEach((r,i)=>{const ev=r.kind==='event';
+ h+=`<div class="card"><div class="row"><div class="t">${esc(r.time)}</div><div class="l"><b>${esc(r.label)}</b><small>${esc(r.sched)} · ${esc(r.sound)}</small></div><div class="st ${tone(r.status)}">${esc(r.status)}</div></div>`;
+ if(ev)h+=`<div class="acts">${r.can_skip?`<button onclick="skipRow(${i})">${r.skipped?'Undo skip':'Skip '+tab}</button>`:''}<button class="rec" onclick="sheetOpenRow(${i})">🎤 Record message</button></div>`;
+ h+='</div>'});
+ L.innerHTML=h||`<div class="empty">Nothing planned ${tab}.</div>`;$('foot').textContent=tab==='today'?'Skips apply to today only. Alarms set on the computer are listed but managed there.':'Skips here apply to tomorrow only.'}
+function skipRow(i){const r=S[tab][i];if(r)api('skip',{sid:r.sid,eid:r.eid,day:tab,on:!r.skipped})}
+function sheetOpenRow(i){const r=S[tab][i];if(r)sheetOpen(r.sid,r.eid,r.label)}
+function toggleSched(i){const s=S.schedules[i];if(s)api('toggle',{sid:s.id,enabled:!s.enabled})}
+function skipSched(i,day){const s=S.schedules[i];if(s)api('skip',{sid:s.id,day:day,on:!(day==='today'?s.skipped_today:s.skipped_tomorrow)})}
+function sheetOpen(sid,eid,label){target={sid,eid,label};blob=null;$('sh-title').textContent='Message for “'+label+'”';$('sh-sub').textContent='Replaces the current sound of this event, from its next play onwards.';
+ $('sh-audio').style.display='none';$('sh-use').disabled=true;$('sh-rec').textContent='●  Record';$('sh-hint').innerHTML='';
+ if(!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder)){$('sh-rec').textContent='Choose or record a file…';$('sh-rec').onclick=()=>$('sh-file').click();
+ $('sh-hint').textContent=window.isSecureContext?'This browser cannot record directly; pick a voice memo instead.':'This page is plain http, so the phone will not allow the microphone. Pick a voice-memo file instead.'}
+ else{$('sh-rec').onclick=recToggle}$('sheet').style.display='block'}
+function sheetClose(){if(rec&&rec.state!=='inactive')rec.stop();rec=null;$('sheet').style.display='none';clearInterval(timer)}
+async function recToggle(){if(rec&&rec.state==='recording'){rec.stop();return}
+ try{const stream=await navigator.mediaDevices.getUserMedia({audio:true});chunks=[];const mime=['audio/webm;codecs=opus','audio/mp4','audio/webm'].find(m=>MediaRecorder.isTypeSupported(m))||'';
+ rec=new MediaRecorder(stream,mime?{mimeType:mime}:{});rec.ondataavailable=e=>chunks.push(e.data);
+ rec.onstop=()=>{stream.getTracks().forEach(t=>t.stop());clearInterval(timer);blob=new Blob(chunks,{type:rec.mimeType||'audio/webm'});const a=$('sh-audio');a.src=URL.createObjectURL(blob);a.style.display='block';
+ $('sh-rec').textContent='●  Record again';$('sh-use').disabled=false;$('sh-hint').textContent='Listen to it, then press “Use this message”.'};
+ rec.start();t0=Date.now();$('sh-rec').textContent='■  Stop recording  0 s';$('sh-use').disabled=true;meter(stream);timer=setInterval(()=>{$('sh-rec').textContent='■  Stop recording  '+Math.round((Date.now()-t0)/1000)+' s'},500)}
+ catch(e){$('sh-hint').textContent='The phone did not allow the microphone. Allow it for this site in the browser settings, or pick a voice memo file.';$('sh-rec').textContent='Choose or record a file…';$('sh-rec').onclick=()=>$('sh-file').click()}}
+function meter(stream){try{ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();const src=ctx.createMediaStreamSource(stream),an=ctx.createAnalyser();an.fftSize=512;src.connect(an);const buf=new Uint8Array(an.fftSize);
+ (function tick(){if(!rec||rec.state!=='recording'){$('level').firstChild.style.width='0';return}an.getByteTimeDomainData(buf);let p=0;for(const v of buf)p=Math.max(p,Math.abs(v-128));$('level').firstChild.style.width=Math.min(100,p*1.4)+'%';requestAnimationFrame(tick)})()}catch(e){}}
+function fileChosen(inp){if(inp.files[0]){blob=inp.files[0];const a=$('sh-audio');a.src=URL.createObjectURL(blob);a.style.display='block';$('sh-use').disabled=false;$('sh-hint').textContent='Listen to it, then press “Use this message”.'}}
+async function upload(){if(!blob||!target)return;$('sh-use').disabled=true;$('sh-hint').textContent='Sending to the alarm clock…';
+ try{const r=await fetch('/api/record',{method:'POST',headers:{'Content-Type':blob.type||'application/octet-stream','X-Schedule':target.sid,'X-Event':target.eid},body:blob});const j=await r.json();
+ if(j.error){$('sh-hint').textContent=j.error;$('sh-use').disabled=false;return}sheetClose();toast(j.note||'Message saved');poll()}catch(e){$('sh-hint').textContent='Sending failed. Check the Wi-Fi and try again.';$('sh-use').disabled=false}}
+poll();setInterval(poll,4000);document.addEventListener('visibilitychange',()=>{if(!document.hidden)poll()});
+</script></body></html>"""
+
+REMOTE_LOGIN = r"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Alarm Clock</title>
+<style>body{margin:0;background:#F3F5F9;color:#1E2533;font:16px -apple-system,"Helvetica Neue",Segoe UI,Roboto,sans-serif}.login{max-width:360px;margin:60px auto;padding:0 16px;text-align:center}
+.login input{width:100%;box-sizing:border-box;font-size:28px;letter-spacing:8px;text-align:center;padding:12px;border:1px solid #E3E7EE;border-radius:10px;margin:14px 0}.login button{width:100%;padding:14px;font-size:17px;border:0;border-radius:10px;background:#3A6FF0;color:#fff}
+.bad{color:#C62828}.muted{color:#6B7280;font-size:14px}</style></head><body><form class="login" method="post" action="/login">
+<h1 style="font-size:22px">Alarm Clock</h1><p>Enter the PIN shown on the computer under <b>More options → Phone remote</b>.</p>
+<input name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" autofocus placeholder="······">{msg}<button>Connect</button>
+<p class="muted">Only phones on this Wi-Fi can reach this page.</p></form></body></html>"""
+
+
+class _QuietHTTPServer(ThreadingHTTPServer):
+    """A phone that types http:// on the https port, or drops the Wi-Fi mid-request, is one log line, not a traceback."""
+    def handle_error(self, request, client_address):
+        log(f"phone remote: request from {client_address[0]} failed: {sys.exc_info()[1]}")
+
+
+class RemoteServer:
+    """The phone remote: a tiny web server on the home Wi-Fi.  Every request is answered by `dispatch(action, payload)`,
+    which the App runs on its main thread, so this thread never touches Tk or the store directly.  A phone must enter
+    the PIN once; it then holds a random session cookie.  HTTPS when a certificate could be made (phones only allow
+    the microphone on https), plain http otherwise."""
+
+    MAX_UPLOAD = 60 * 1024 * 1024
+    MAX_FAILS = 5
+
+    def __init__(self, dispatch, pin: str, port: int, cert: str = "", hostname: str = ""):
+        self.dispatch, self.pin, self.port, self.cert = dispatch, pin, int(port), cert
+        self.hostname = hostname or platform.node().split(".")[0] or "this computer"
+        self.sessions: set[str] = set()
+        self.fails: list[float] = []
+        self.https = False
+        self.httpd: ThreadingHTTPServer | None = None
+        self.thread: threading.Thread | None = None
+        self.error = ""
+
+    # ----- lifecycle
+    def start(self) -> bool:
+        server = self
+        handler = type("RemoteHandler", (_RemoteHandler,), {"server_obj": server})
+        try:
+            self.httpd = _QuietHTTPServer((REMOTE_BIND, self.port), handler)
+            self.httpd.daemon_threads = True
+            if self.cert and os.path.isfile(self.cert):
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.load_cert_chain(self.cert)
+                self.httpd.socket = ctx.wrap_socket(self.httpd.socket, server_side=True)
+                self.https = True
+            self.port = self.httpd.server_address[1]
+        except (OSError, ssl.SSLError) as e:
+            self.error = str(e)
+            log(f"phone remote could not start on port {self.port}: {e}")
+            self.httpd = None
+            return False
+        self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.5}, daemon=True)
+        self.thread.start()
+        log(f"phone remote listening on {self.url()}")
+        return True
+
+    def stop(self) -> None:
+        if self.httpd:
+            try:
+                self.httpd.shutdown()
+                self.httpd.server_close()
+            except OSError:
+                pass
+            self.httpd = None
+            log("phone remote stopped")
+
+    @property
+    def running(self) -> bool:
+        return self.httpd is not None
+
+    def url(self, ip: str | None = None) -> str:
+        return f"{'https' if self.https else 'http'}://{ip or lan_ip()}:{self.port}"
+
+    # ----- auth
+    def check_pin(self, pin: str) -> str | None:
+        """A new session token when the PIN is right; None otherwise (5 wrong tries block for 10 minutes)."""
+        now = time.monotonic()
+        self.fails = [t for t in self.fails if now - t < 600]
+        if len(self.fails) >= self.MAX_FAILS:
+            return None
+        if secrets.compare_digest(pin.strip(), self.pin):
+            token = secrets.token_urlsafe(32)
+            self.sessions.add(token)
+            return token
+        self.fails.append(now)
+        time.sleep(0.5)
+        return None
+
+    @property
+    def locked(self) -> bool:
+        now = time.monotonic()
+        return len([t for t in self.fails if now - t < 600]) >= self.MAX_FAILS
+
+
+class _RemoteHandler(BaseHTTPRequestHandler):
+    server_obj: RemoteServer
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):      # keep the terminal quiet; errors are logged where they happen
+        pass
+
+    # ----- helpers
+    def _token(self) -> str:
+        cookie = self.headers.get("Cookie", "")
+        for part in cookie.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "remote":
+                return v
+        return ""
+
+    def _authed(self) -> bool:
+        return self._token() in self.server_obj.sessions
+
+    def _send(self, code: int, body: bytes, ctype: str = "text/html; charset=utf-8", extra: dict | None = None) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, code: int, obj: dict) -> None:
+        self._send(code, json.dumps(obj).encode("utf-8"), "application/json")
+
+    def _body(self, limit: int) -> bytes | None:
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return None
+        if n < 0 or n > limit:
+            return None
+        return self.rfile.read(n) if n else b""
+
+    # ----- routes
+    def do_GET(self) -> None:
+        path = urlparse(self.path).path
+        if path == "/":
+            if self._authed():
+                self._send(200, REMOTE_PAGE.encode("utf-8"))
+            else:
+                self._send(200, REMOTE_LOGIN.replace("{msg}", "").encode("utf-8"))
+        elif path == "/health":
+            self._json(200, {"ok": True})
+        else:
+            self._send(404, b"Not found", "text/plain")
+
+    def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        if path == "/login":
+            body = self._body(4096)
+            pin = parse_qs((body or b"").decode("utf-8", "replace")).get("pin", [""])[0]
+            token = self.server_obj.check_pin(pin)
+            if token:
+                # https: the phone stays connected for a year.  Plain http: only until the browser is closed, since the
+                # cookie travels unencrypted and anyone watching the Wi-Fi could copy it.
+                cookie = (f"remote={token}; Path=/; HttpOnly; SameSite=Strict"
+                          + ("; Max-Age=31536000; Secure" if self.server_obj.https else ""))
+                self._send(303, b"", extra={"Location": "/", "Set-Cookie": cookie})
+                return
+            msg = ("<p class=bad>Too many wrong PINs. Wait 10 minutes and try again.</p>" if self.server_obj.locked
+                   else "<p class=bad>That PIN is not right. It is shown on the computer under More options.</p>")
+            self._send(401, REMOTE_LOGIN.replace("{msg}", msg).encode("utf-8"))
+            return
+        if not path.startswith("/api/"):
+            self._send(404, b"Not found", "text/plain")
+            return
+        if not self._authed():
+            self._json(401, {"error": "Enter the PIN first."})
+            return
+        action = path[len("/api/"):]
+        if action == "record":
+            self._record()
+            return
+        body = self._body(64 * 1024)
+        try:
+            payload = json.loads(body.decode("utf-8")) if body else {}
+            if not isinstance(payload, dict):
+                raise ValueError("not an object")
+        except (ValueError, UnicodeDecodeError):
+            self._json(400, {"error": "Bad request."})
+            return
+        if action not in ("state", "stop", "snooze", "skip", "toggle"):
+            self._json(404, {"error": "Unknown action."})
+            return
+        self._json(200, self.server_obj.dispatch(action, payload))
+
+    def _record(self) -> None:
+        sid, eid = self.headers.get("X-Schedule", ""), self.headers.get("X-Event", "")
+        if not sid or not eid or any(c for c in sid + eid if not (c.isalnum() or c in "-_")):
+            self._json(400, {"error": "Bad request."})
+            return
+        data = self._body(RemoteServer.MAX_UPLOAD)
+        if data is None:
+            self._json(413, {"error": "That recording is too big (more than 60 MB)."})
+            return
+        if len(data) < 200:
+            self._json(400, {"error": "The recording is empty. Record it again."})
+            return
+        ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        ext = {"audio/webm": ".webm", "video/webm": ".webm", "audio/mp4": ".m4a", "audio/x-m4a": ".m4a", "audio/aac": ".aac",
+               "audio/mpeg": ".mp3", "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/wave": ".wav", "audio/ogg": ".ogg",
+               "audio/3gpp": ".3gp", "audio/amr": ".amr"}.get(ctype, ".bin")
+        os.makedirs(REC_DIR, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        wav = os.path.join(REC_DIR, f"voice_{stamp}_phone.wav")
+        n = 1
+        while os.path.exists(wav):                     # two messages in the same second must not share a name
+            n += 1
+            wav = os.path.join(REC_DIR, f"voice_{stamp}_phone{n}.wav")
+        raw = wav[:-4] + "_upload" + ext
+        try:
+            with open(raw, "wb") as f:
+                f.write(data)
+            convert_upload(raw, wav)
+            peak, gain = normalize_wav(wav)
+        except Exception as e:
+            log(f"phone recording failed: {e}")
+            for p in (raw, wav):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            self._json(500, {"error": str(e).split("\n\n")[0]})
+            return
+        finally:
+            try:
+                os.remove(raw)
+            except OSError:
+                pass
+        log(f"phone recording saved {os.path.basename(wav)}: peak {peak*100:.1f}% → boosted {gain:+.0f} dB")
+        result = self.server_obj.dispatch("attach", {"sid": sid, "eid": eid, "path": wav, "peak": peak})
+        if result.get("error"):
+            try:
+                os.remove(wav)
+            except OSError:
+                pass
+        self._json(200, result)
+
+
 class PowerManager:
     """
     Two independent jobs:
@@ -1576,6 +2001,7 @@ class App(tk.Tk):
         self._link_path = ""                      # the file that form_link describes
         self.ev_link_open = False                 # the event editor is showing the link row
         self.link_open = False                    # the alarm editor is showing the link row
+        self.remote: RemoteServer | None = None    # phone remote web server (More options)
         self._today_expanded = False
         self._saved_job: str | None = None
 
@@ -1592,6 +2018,8 @@ class App(tk.Tk):
         self._refresh_schedules()
         self._refresh_today()
         self._show_page("today")
+        if self.store.settings.get("remote_enabled"):
+            self._remote_start()
         if self.store.load_problem:
             self.after(200, lambda: messagebox.showerror(APP_NAME, self.store.load_problem))
         if not self.player.ok:
@@ -1985,6 +2413,16 @@ class App(tk.Tk):
         ttk.Label(r2, text="seconds", style="Card.TLabel").pack(side="left")
         for var in (self.v_sysvol_level, self.v_snooze, self.v_fade):
             var.trace_add("write", lambda *_: self._settings_changed())
+        ttk.Separator(mc).pack(fill="x", pady=(10, 8))
+        self.v_remote = tk.BooleanVar(value=bool(s.get("remote_enabled")))
+        r3 = ttk.Frame(mc, style="Card.TFrame")
+        r3.pack(anchor="w", fill="x")
+        ttk.Checkbutton(r3, text="Phone remote – stop, skip, pause routines and record messages from a phone on this Wi-Fi",
+                        variable=self.v_remote, style="Card.TCheckbutton", command=self._settings_changed).pack(side="left")
+        self.b_remote_pin = ttk.Button(r3, text="New PIN", style="Soft.TButton", command=self._remote_new_pin)
+        self.l_remote = ttk.Label(mc, text="", style="Muted.TLabel", wraplength=560, justify="left")
+        self.l_remote.pack(anchor="w", padx=(26, 0))
+        self._remote_label()
 
         self._build_today()
         self._build_schedules()
@@ -2214,22 +2652,29 @@ class App(tk.Tk):
         today = datetime.now().date()
         if not self._can_skip(r):
             return
-        if on and self.store.is_skipped(today, r["sid"]):
+        sc = self.store.get_schedule(r["sid"])
+        ev = next((e for e in sc["events"] if e["id"] == r["eid"]), None) if sc else None
+        if not ev:
             return
-        if not on and self.store.is_skipped(today, r["sid"]):
-            # the whole schedule was skipped: bring back only this event, keep the others skipped
-            sc = self.store.get_schedule(r["sid"])
-            self.store.set_skip(today, r["sid"], None, False)
-            for other in (sc["events"] if sc else []):
-                if other["id"] != r["eid"]:
-                    self.store.set_skip(today, r["sid"], other["id"], True)
-        self.store.set_skip(today, r["sid"], r["eid"], on)
-        if on:
-            self._cancel_announcements(r["sid"], r["eid"], "skipped for today")
-        log(f"{'skip' if on else 'undo skip'} today: '{r['label']}' ({r['sched']})")
+        self._skip_event(today, sc, ev, on)
         self.l_today_hint.config(text=(f"“{r['label']}” is skipped for today only. Tomorrow it runs as usual." if on
                                        else f"“{r['label']}” is back on for today."))
         self._refresh_today(); self._refresh_schedules(); self._apply_power(); self._tick_indicators()
+
+    def _skip_event(self, today: date, sc: dict, ev: dict, on: bool) -> None:
+        """Skip / un-skip one event for today (shared by the Today buttons and the phone remote)."""
+        if on and self.store.is_skipped(today, sc["id"]):
+            return
+        if not on and self.store.is_skipped(today, sc["id"]):
+            # the whole schedule was skipped: bring back only this event, keep the others skipped
+            self.store.set_skip(today, sc["id"], None, False)
+            for other in sc["events"]:
+                if other["id"] != ev["id"]:
+                    self.store.set_skip(today, sc["id"], other["id"], True)
+        self.store.set_skip(today, sc["id"], ev["id"], on)
+        if on:
+            self._cancel_announcements(sc["id"], ev["id"], "skipped for today")
+        log(f"{'skip' if on else 'undo skip'} today: '{ev['label']}' ({sc['name']})")
 
     def _today_preview(self) -> None:
         r = self._today_selected()
@@ -2953,8 +3398,196 @@ class App(tk.Tk):
                 s[key] = int(var.get())
             except ValueError:
                 pass  # field is mid-edit (empty); keep the previous value
+        want = bool(self.v_remote.get())
+        if want != bool(s.get("remote_enabled")):
+            s["remote_enabled"] = want
+            if want:
+                self._remote_start()
+            else:
+                self._remote_stop()
         self.store.save()
         self._apply_power()
+
+    # ================================================================== phone remote
+    def _remote_start(self) -> None:
+        s = self.store.settings
+        if not s.get("remote_pin"):
+            s["remote_pin"] = make_pin()
+            self.store.save()
+        cert = CERT_FILE if ensure_cert() else ""
+        self.remote = RemoteServer(self._remote_dispatch, s["remote_pin"], int(s.get("remote_port", 8765)), cert)
+        if not self.remote.start():
+            self.remote = None
+        self._remote_label()
+
+    def _remote_stop(self) -> None:
+        if self.remote:
+            self.remote.stop()
+            self.remote = None
+        self._remote_label()
+
+    def _remote_new_pin(self) -> None:
+        self.store.settings["remote_pin"] = make_pin()
+        self.store.save()
+        if self.remote:
+            self.remote.pin = self.store.settings["remote_pin"]
+            self.remote.sessions.clear()                 # every phone must enter the new PIN
+        self._remote_label()
+
+    def _remote_label(self) -> None:
+        s = self.store.settings
+        if not hasattr(self, "l_remote"):
+            return
+        if self.remote and self.remote.running:
+            text = (f"On your phone open  {self.remote.url()}  and enter PIN  {pin_label(s['remote_pin'])}.  "
+                    + ("The first time, the phone warns about the certificate – choose to continue; it is your own computer."
+                       if self.remote.https else
+                       "No certificate could be made (openssl is missing), so the page is plain http: the PIN travels unencrypted and "
+                       "someone on this Wi-Fi who watches the traffic could take over the remote. Use it only on a Wi-Fi you trust. "
+                       "Phones must enter the PIN again after closing the browser, and cannot record with the microphone (a voice-memo file can still be sent)."))
+            self.b_remote_pin.pack(side="left", padx=(12, 0))
+        elif self.v_remote.get():
+            text = ("The phone remote could not start" + (f": {self.remote.error}" if self.remote and self.remote.error else "")
+                    + ".  Another program may be using the port; quit it and switch the remote off and on again.")
+            self.b_remote_pin.pack_forget()
+        else:
+            text = "Off.  When on, phones on the same Wi-Fi get a small page with STOP, today, tomorrow and your routines."
+            self.b_remote_pin.pack_forget()
+        self.l_remote.config(text=text)
+
+    def _remote_dispatch(self, action: str, payload: dict) -> dict:
+        """Called from the web server thread: hand the request to the main thread and wait for its answer."""
+        reply: queue.Queue = queue.Queue(maxsize=1)
+        self.events.put(("remote", action, (payload, reply)))
+        try:
+            return reply.get(timeout=8)
+        except queue.Empty:
+            return {"error": "The alarm clock is busy right now. Try again in a moment."}
+
+    def _remote_apply(self, action: str, p: dict) -> dict:
+        """Main thread: the phone's request, using exactly the same code paths as the buttons on the computer."""
+        today = datetime.now().date()
+        day = today + timedelta(days=1) if p.get("day") == "tomorrow" else today
+        if action == "state":
+            return self._remote_state()
+        if action == "stop":
+            what = "message" if self.current_ann else "alarm" if self.ring_windows else ""
+            self._stop_all()
+            log("phone remote: stop")
+            return {"ok": True, "note": f"Stopped the {what}." if what else "Nothing was playing."}
+        if action == "snooze":
+            ringing = [a for a in self.store.alarms if a["id"] in self.ring_windows and a["id"] not in self.once_play]
+            if not ringing:
+                return {"ok": True, "note": "No alarm is ringing."}
+            for a in ringing:
+                self._snooze(a)
+            log("phone remote: snooze")
+            mins = int(self.store.settings.get("snooze_minutes", 5))
+            return {"ok": True, "note": f"Snoozed – rings again in {mins} minutes."}
+        sc = self.store.get_schedule(str(p.get("sid", "")))
+        if not sc:
+            return {"error": "That routine no longer exists."}
+        if action == "skip":
+            on, eid = bool(p.get("on")), str(p.get("eid") or "")
+            when = "today" if day == today else "tomorrow"
+            if eid:
+                ev = next((e for e in sc["events"] if e["id"] == eid), None)
+                if not ev:
+                    return {"error": "That event no longer exists."}
+                if day == today:
+                    self._skip_event(today, sc, ev, on)
+                else:
+                    self.store.set_skip(day, sc["id"], ev["id"], on)
+                    log(f"phone remote: {'skip' if on else 'undo skip'} tomorrow: '{ev['label']}' ({sc['name']})")
+                note = f"“{ev['label']}” is skipped {when}." if on else f"“{ev['label']}” is back on {when}."
+            else:
+                self.store.set_skip(day, sc["id"], None, on)
+                if on and day == today:
+                    self._cancel_announcements(sc["id"], None, "skipped for today")
+                log(f"phone remote: {'skip' if on else 'undo skip'} {when}: whole schedule '{sc['name']}'")
+                note = f"“{sc['name']}” is skipped {when}." if on else f"“{sc['name']}” is back on {when}."
+            self._after_schedule_change()
+            return {"ok": True, "note": note}
+        if action == "toggle":
+            on = bool(p.get("enabled"))
+            self._set_schedule_enabled(sc, on, source="phone remote")
+            return {"ok": True, "note": f"“{sc['name']}” is on again." if on else f"“{sc['name']}” is off."}
+        if action == "attach":
+            eid, path = str(p.get("eid") or ""), str(p.get("path") or "")
+            if float(p.get("peak") or 0) < QUIET_PEAK:
+                return {"error": "Almost nothing was recorded. Hold the phone closer and record again."}
+            sc2 = json.loads(json.dumps(sc))
+            ev = next((e for e in sc2["events"] if e["id"] == eid), None)
+            if not ev or not os.path.isfile(path):
+                return {"error": "That event no longer exists."}
+            ev["sound"] = portable_sound(path)
+            ev.pop("link", None)
+            self.store.upsert_schedule(sc2)
+            if self.sdraft and self.sdraft["id"] == sc2["id"]:          # keep an open editor in step
+                for d in self.sdraft["events"]:
+                    if d["id"] == eid:
+                        d["sound"], _ = ev["sound"], d.pop("link", None)
+                if self.ev_draft and self.ev_draft["id"] == eid:
+                    self.ev_draft["sound"] = ev["sound"]; self.ev_draft.pop("link", None)
+                    self._event_sound_ui()
+                self.sdraft_saved = json.dumps(sc2, sort_keys=True) if not self._sched_dirty() else self.sdraft_saved
+            log(f"phone remote: new message for '{ev['label']}' ({sc2['name']}): {os.path.basename(path)}")
+            self._after_schedule_change()
+            return {"ok": True, "note": f"“{ev['label']}” now plays your new message."}
+        return {"error": "Unknown action."}
+
+    def _remote_state(self) -> dict:
+        now = datetime.now()
+        today, tomorrow = now.date(), now.date() + timedelta(days=1)
+        if self.current_ann:
+            playing = f"Playing “{self.current_ann['event']['label']}” ({self.current_ann['schedule']['name']})"
+        elif self.ring_windows:
+            labels = [a["label"] for a in self.store.alarms if a["id"] in self.ring_windows] or ["alarm"]
+            playing = ("Playing " if len(self.ring_windows) == len(self.once_play) else "Ringing: ") + ", ".join(f"“{x}”" for x in labels)
+        else:
+            playing = ""
+        ev = self.scheduler.next_event()
+        nxt = f"Next: “{ev[1]['label']}” {ev[0]:%a %H:%M}" if ev else ""
+        snooze_ok = any(aid not in self.once_play for aid in self.ring_windows)
+
+        def row(r: dict, day: date) -> dict:
+            return {"kind": r["kind"], "time": r["time"], "label": r["label"], "sched": r["sched"], "sound": r["sound"],
+                    "status": r["status"], "sid": r["sid"], "eid": r["eid"], "skipped": bool(r.get("skipped")),
+                    "can_skip": bool(r["kind"] == "event" and (self._can_skip(r) if day == today else r["status"] in ("Planned", "Skipped", "No sound")))}
+        return {"host": platform.node().split(".")[0], "now": f"{now:%H:%M}", "playing": playing, "next": nxt,
+                "today": [row(r, today) for r in self._today_rows()],
+                "tomorrow": [row(r, tomorrow) for r in self._day_rows(tomorrow)],
+                "schedules": [{"id": sc["id"], "name": sc["name"], "enabled": bool(sc["enabled"]), "days": days_label(sc["days"]),
+                               "events": len(sc["events"]), "output": output_label(sc.get("output", "")),
+                               "skipped_today": self.store.is_skipped(today, sc["id"]),
+                               "skipped_tomorrow": self.store.is_skipped(tomorrow, sc["id"])} for sc in self.store.schedules],
+                "snooze": snooze_ok, "snooze_minutes": int(self.store.settings.get("snooze_minutes", 5))}
+
+    def _day_rows(self, day: date) -> list[dict]:
+        """What is planned for a future day (no history yet): routine events and alarms, with a plain status."""
+        rows: list[dict] = []
+        for sc in self.store.schedules:
+            if not sc["enabled"] or day.weekday() not in sc["days"]:
+                continue
+            for ev in sc["events"]:
+                try:
+                    dt = datetime.combine(day, alarm_time(ev))
+                except ValueError:
+                    continue
+                path = resolve_sound(ev.get("sound", ""))
+                skipped = self.store.is_skipped(day, sc["id"], ev["id"])
+                status = ("Off" if not ev["enabled"] else "Skipped" if skipped else "No sound" if not path
+                          else "Missing file" if not os.path.isfile(path) else "Planned")
+                rows.append(dict(kind="event", dt=dt, time=ev["time"], label=ev["label"], sched=sc["name"], sid=sc["id"], eid=ev["id"],
+                                 sound=sound_title(ev), status=status, skipped=skipped))
+        start = datetime.combine(day, dtime(0, 0))
+        for a in self.store.alarms:
+            nf = next_fire(a, start)
+            if nf and nf.date() == day:
+                rows.append(dict(kind="alarm", dt=nf, time=f"{nf:%H:%M}", label=a["label"], sched="Alarm", sid=None, eid=a["id"],
+                                 sound=sound_title(a), status="Planned", skipped=False))
+        rows.sort(key=lambda r: (r["dt"], r["sched"], r["label"]))
+        return rows
 
     def _remember_wake(self, when: datetime | None) -> None:
         """Called from the power worker thread: persist the registered wake so the next launch can cancel it."""
@@ -3072,7 +3705,8 @@ class App(tk.Tk):
             self.l_next.config(text="Nothing is set yet.  Create a schedule, or set an alarm – it takes three steps.")
         if self.v_page.get() == "today":
             self._refresh_today_countdown()
-        self.l_status.config(text=f"Alarms and recordings are kept in {BASE_DIR}")
+        self.l_status.config(text=f"Alarms and recordings are kept in {BASE_DIR}"
+                                  + (f"   ·   Phone remote on: {self.remote.url()}" if self.remote and self.remote.running else ""))
         self._tick_indicators()
         if (self.airplay and ev and self._is_airplay(ev[1].get("output", "")) and self._prewarmed != ev[1]["id"]
                 and timedelta(0) <= ev[0] - now <= timedelta(minutes=3)):
@@ -3096,6 +3730,14 @@ class App(tk.Tk):
                     self.l_form_hint.config(text=when)
                 elif kind == "link":
                     self._on_link_event(a, when)
+                elif kind == "remote":
+                    payload, reply = when
+                    try:
+                        result = self._remote_apply(a, payload)
+                    except Exception as e:           # the phone gets a sentence, the server thread never hangs
+                        log(f"phone remote request '{a}' failed: {e}")
+                        result = {"error": "Something went wrong on the computer. Try again, or check it there."}
+                    reply.put(result)
                 elif kind == "announce":
                     self.announcements.push(a)
                     self._pump_announcements()
@@ -3364,16 +4006,20 @@ class App(tk.Tk):
         sc = self._sched_selected()
         if not sc:
             return
-        sc = dict(sc, enabled=not sc["enabled"])
+        self._set_schedule_enabled(sc, not sc["enabled"])
+
+    def _set_schedule_enabled(self, sc: dict, on: bool, source: str = "") -> None:
+        """Turn a schedule on / off (shared by the Schedules buttons, double-click and the phone remote)."""
+        sc = dict(sc, enabled=on)
         self.store.upsert_schedule(sc)
-        if not sc["enabled"]:
+        if not on:
             self._cancel_announcements(sc["id"], None, "schedule was turned off")
         else:
             self._mark_past_events(sc)
         if self.sdraft and self.sdraft["id"] == sc["id"]:
-            self.sdraft["enabled"] = sc["enabled"]; self.v_senabled.set(sc["enabled"])
+            self.sdraft["enabled"] = on; self.v_senabled.set(on)
             self.sdraft_saved = json.dumps(sc, sort_keys=True)
-        log(f"schedule '{sc['name']}' turned {'on' if sc['enabled'] else 'off'}")
+        log(f"schedule '{sc['name']}' turned {'on' if on else 'off'}" + (f" ({source})" if source else ""))
         self._after_schedule_change()
 
     def _sched_duplicate(self) -> None:
@@ -4037,6 +4683,7 @@ class App(tk.Tk):
             self.store.record(occ["key"], "missed", "the app was closed before it played")
         self.scheduler.stop()
         self.links.cancel()
+        self._remote_stop()
         self.player.stop()
         if self.airplay and self.airplay.playing:
             self.airplay.stop()

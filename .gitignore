@@ -17,3 +17,4 @@ recordings/*
 .DS_Store
 Thumbs.db
 links/
+phone-remote-cert.pem

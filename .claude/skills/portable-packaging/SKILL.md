@@ -18,6 +18,7 @@ Mp3Player/
   alarms.json               created on first save (alarms + settings)
   recordings/               voice recordings
   links/                    sounds saved from YouTube / SoundCloud links (<extractor>_<id>.mp3), incoming/ holds partial downloads
+  phone-remote-cert.pem     self-signed key+cert for the phone remote's https (made with the openssl CLI on first use; git-ignored, per machine)
   alarmclock.log            what happened and when
   .venv/                    created by the launcher on first run (never commit)
 ```
@@ -30,6 +31,9 @@ Mp3Player/
 - macOS launcher searches python.org and Homebrew paths explicitly because Finder gives `.command` files a minimal PATH; it also checks `import tkinter` because Homebrew Python needs `python-tk`.
 - Windows uses `pythonw.exe` so no console window stays open.
 - Adding a dependency = adding it to `requirements.txt` AND confirming a wheel exists for macOS arm64, macOS x86_64, Windows x64 (no compiler on user machines). Check with `pip download --only-binary=:all: --platform win_amd64 <pkg>`.
+
+## Phone remote
+- `RemoteServer` binds `REMOTE_BIND` (0.0.0.0) on `settings.remote_port` (8765). Tests set `REMOTE_BIND = "127.0.0.1"` and port 0. HTTPS needs `openssl` on PATH (macOS / Linux yes, Windows usually no → plain http, page recording disabled but file upload works). Uploads are converted with the same bundled ffmpeg as links. The frozen app inherits all of this; PyInstaller needs nothing extra (stdlib http.server + ssl).
 
 ## Standalone build
 `./build_standalone.sh` → PyInstaller `--windowed --collect-all yt_dlp --collect-all imageio_ffmpeg` (yt-dlp's extractors are lazy imports, imageio-ffmpeg's binary is package data), adds `NSMicrophoneUsageDescription` and ad-hoc codesigns on macOS. A frozen app cannot self-update yt-dlp; rebuild to pick up a newer one. Downloaded unsigned apps get Gatekeeper's "unidentified developer" warning: right-click → Open the first time. Say so in the README; don't try to bypass Gatekeeper.
